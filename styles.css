@@ -9,3 +9,9 @@
 .product-option span{white-space:normal;line-height:1.25}
 .product-option:hover,.product-option.active{background:#eef4fb}
 .product-no-results{padding:12px;color:#778;text-align:center}
+
+/* Estado de conexión con Supabase */
+.db-status{display:inline-block;margin-top:4px;padding:4px 9px;border-radius:999px;font-size:11px;font-weight:700;background:#eef2f7;color:#52606d}
+.db-status[data-state="ok"]{background:#e8f7ee;color:#137333}
+.db-status[data-state="loading"]{background:#fff7dd;color:#8a5a00}
+.db-status[data-state="error"]{background:#fdecec;color:#b3261e}
