@@ -15,3 +15,5 @@
 .db-status[data-state="ok"]{background:#e8f7ee;color:#137333}
 .db-status[data-state="loading"]{background:#fff7dd;color:#8a5a00}
 .db-status[data-state="error"]{background:#fdecec;color:#b3261e}
+
+.assignment-preview{display:flex;flex-wrap:wrap;gap:8px;margin-top:10px;min-height:4px}.assign-chip{background:#eef5ff;border:1px solid #c8daf7;border-radius:999px;padding:6px 10px;font-size:12px;color:#173a67}.mini{padding:5px 8px;font-size:11px;border-radius:6px}.danger{background:#fff0f0!important;color:#a31d1d!important;border:1px solid #efb6b6!important}.status-pill{display:inline-block;border-radius:999px;padding:3px 8px;font-size:11px;font-weight:700}.status-pill.verde{background:#dcfce7;color:#166534}.status-pill.amarillo{background:#fef3c7;color:#92400e}.status-pill.rojo{background:#fee2e2;color:#991b1b}.status-pill.vencido{background:#e5e7eb;color:#111827}.expiry .expired{background:#e5e7eb;color:#111827}
