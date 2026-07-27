@@ -15,6 +15,11 @@ let qualityTab = 'PENDING';
 let qualityMode = 'PENDING';
 let dashboardSnapshot = null;
 let transferSelected = null;
+let orderImportPreview = [];
+let orderRows = [];
+let picklistRows = [];
+let currentPicklistDetail = [];
+let currentPicklistId = null;
 
 const $ = s => document.querySelector(s);
 const $$ = s => [...document.querySelectorAll(s)];
@@ -95,6 +100,7 @@ async function refreshOperationalData() {
     renderQuality();
     renderTransfers();
     renderExpiry(expiryRows || []);
+    await refreshOrdersPicklists();
     await refreshDashboardSnapshot();
   } catch (err) {
     console.warn('Datos operativos todavía no disponibles:', err.message);
@@ -1021,3 +1027,364 @@ $('#closeTransferModal')?.addEventListener('click', closeTransferModal);
 $('#cancelTransfer')?.addEventListener('click', closeTransferModal);
 $('#confirmTransfer')?.addEventListener('click', confirmTransfer);
 $('#transferModal')?.addEventListener('click', e => { if (e.target.id === 'transferModal') closeTransferModal(); });
+
+
+
+// ============================================================
+// PEDIDOS + PICKLIST v1
+// ============================================================
+function normalizeOrderHeader(v) {
+  return normalizeText(v).replace(/\s+/g,' ').trim();
+}
+
+function orderCell(row, idx) {
+  if (idx < 0 || idx >= row.length) return '';
+  return row[idx] ?? '';
+}
+
+function parseOrderDate(v) {
+  if (v instanceof Date && !isNaN(v)) return v.toISOString().slice(0,10);
+  if (typeof v === 'number' && window.XLSX?.SSF?.parse_date_code) {
+    const x = window.XLSX.SSF.parse_date_code(v);
+    if (x) return `${String(x.y).padStart(4,'0')}-${String(x.m).padStart(2,'0')}-${String(x.d).padStart(2,'0')}`;
+  }
+  const s = String(v || '').trim();
+  if (!s) return '';
+  let m = s.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{4})/);
+  if (m) return `${m[3]}-${m[2].padStart(2,'0')}-${m[1].padStart(2,'0')}`;
+  m = s.match(/^(\d{4})[\/\-](\d{1,2})[\/\-](\d{1,2})/);
+  if (m) return `${m[1]}-${m[2].padStart(2,'0')}-${m[3].padStart(2,'0')}`;
+  const d = new Date(s);
+  return isNaN(d) ? '' : d.toISOString().slice(0,10);
+}
+
+function parseOrderNumber(v) {
+  if (typeof v === 'number') return v;
+  const s = String(v ?? '').trim().replace(/,/g,'');
+  const n = Number(s);
+  return Number.isFinite(n) ? n : NaN;
+}
+
+function productSkuFromOrderCell(v) {
+  const s = String(v || '').trim();
+  const m = s.match(/\[([^\]]+)\]/);
+  if (m) return m[1].trim();
+  const first = s.split(/\s+/)[0];
+  return products.some(p => String(p.sku) === first) ? first : '';
+}
+
+function orderConversionFactor(unit, product) {
+  const raw = String(unit || '').trim();
+  const u = normalizeText(raw);
+  if (!u) return {error:'Unidad vacía'};
+  if (u.includes('pieza') || u === 'pza' || u === 'pzas') return {factor:1, label:'PIEZA'};
+  if (u.includes('tarima') || u.includes('pallet')) {
+    if (!product.piezas_por_tarima) return {error:'Producto sin piezas/tarima'};
+    return {factor:Number(product.piezas_por_tarima), label:'TARIMA'};
+  }
+  if (u.includes('caja')) {
+    const m = raw.match(/(\d+)\s*(?:pza|pzas|pieza|piezas)/i) || raw.match(/c\s*\/\s*(\d+)/i) || raw.match(/(\d+)/);
+    if (!m) return {error:`No se pudo convertir unidad "${raw}"`};
+    return {factor:Number(m[1]), label:'CAJA'};
+  }
+  return {error:`Unidad no reconocida: ${raw}`};
+}
+
+function findOrderColumn(headers, aliases) {
+  const norm = headers.map(normalizeOrderHeader);
+  for (const alias of aliases) {
+    const a = normalizeOrderHeader(alias);
+    const exact = norm.findIndex(x => x === a);
+    if (exact >= 0) return exact;
+  }
+  for (const alias of aliases) {
+    const a = normalizeOrderHeader(alias);
+    const partial = norm.findIndex(x => x.includes(a));
+    if (partial >= 0) return partial;
+  }
+  return -1;
+}
+
+function parseOrdersWorkbook(file) {
+  return new Promise((resolve,reject) => {
+    if (!window.XLSX) return reject(new Error('No se pudo cargar el lector de Excel.'));
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error('No se pudo leer el archivo.'));
+    reader.onload = e => {
+      try {
+        const wb = window.XLSX.read(e.target.result, {type:'array', cellDates:true});
+        const ws = wb.Sheets[wb.SheetNames[0]];
+        const rows = window.XLSX.utils.sheet_to_json(ws, {header:1, defval:'', raw:true});
+        const headerIndex = rows.findIndex(r => {
+          const h = r.map(normalizeOrderHeader);
+          return h.some(x => x.includes('referencia de entrega')) &&
+                 h.some(x => x === 'producto' || x.includes('producto')) &&
+                 h.some(x => x === 'demanda' || x.includes('demanda'));
+        });
+        if (headerIndex < 0) throw new Error('No encontré encabezados de Referencia de entrega / Producto / Demanda.');
+
+        const headers = rows[headerIndex];
+        const cDate = findOrderColumn(headers,['Fecha programada','Fecha']);
+        const cRef = findOrderColumn(headers,['Referencia de entrega']);
+        const cSO = findOrderColumn(headers,['Orden de venta']);
+        const cCustomer = findOrderColumn(headers,['Cliente','Dirección de entrega','Direccion de entrega']);
+        const cProduct = findOrderColumn(headers,['Producto']);
+        const cDemand = findOrderColumn(headers,['Demanda']);
+        const cUnit = findOrderColumn(headers,['Unidad de medida','Unidad']);
+
+        const required = {Referencia:cRef,Orden:cSO,Cliente:cCustomer,Producto:cProduct,Demanda:cDemand,Unidad:cUnit};
+        const missing = Object.entries(required).filter(([,idx]) => idx < 0).map(([k])=>k);
+        if (missing.length) throw new Error(`Faltan columnas requeridas: ${missing.join(', ')}.`);
+
+        let current = {ref:'', sales:'', customer:'', date:''};
+        const grouped = new Map();
+        const globalErrors = [];
+
+        for (let ri=headerIndex+1; ri<rows.length; ri++) {
+          const r = rows[ri];
+          const refVal = String(orderCell(r,cRef)||'').trim();
+          const salesVal = String(orderCell(r,cSO)||'').trim();
+          const custVal = String(orderCell(r,cCustomer)||'').trim();
+          const dateVal = cDate >= 0 ? parseOrderDate(orderCell(r,cDate)) : '';
+
+          if (refVal) current.ref = refVal;
+          if (salesVal) current.sales = salesVal;
+          if (custVal) current.customer = custVal;
+          if (dateVal) current.date = dateVal;
+
+          const prodCell = orderCell(r,cProduct);
+          const demandRaw = orderCell(r,cDemand);
+          if (!String(prodCell||'').trim() || String(demandRaw||'').trim()==='') continue;
+
+          const demand = parseOrderNumber(demandRaw);
+          if (!Number.isFinite(demand) || demand <= 0) continue;
+          if (!current.ref) { globalErrors.push(`Fila ${ri+1}: producto sin Referencia de entrega.`); continue; }
+
+          const sku = productSkuFromOrderCell(prodCell);
+          const product = products.find(p => String(p.sku) === String(sku));
+          const rowErrors = [];
+          if (!sku || !product) rowErrors.push(`SKU no encontrado: ${sku || String(prodCell)}`);
+          const conv = product ? orderConversionFactor(orderCell(r,cUnit), product) : {error:'Producto inválido'};
+          if (conv.error) rowErrors.push(conv.error);
+
+          const pieces = product && !conv.error ? demand * conv.factor : 0;
+          if (pieces && !Number.isInteger(pieces)) rowErrors.push(`La conversión resulta en piezas fraccionadas: ${pieces}.`);
+
+          if (!grouped.has(current.ref)) {
+            grouped.set(current.ref, {
+              delivery_reference: current.ref,
+              sales_order: current.sales,
+              customer_name: current.customer,
+              scheduled_date: current.date,
+              linesMap: new Map(),
+              errors: []
+            });
+          }
+          const g = grouped.get(current.ref);
+          if (current.sales && g.sales_order && current.sales !== g.sales_order) g.errors.push(`La referencia contiene más de una orden de venta: ${g.sales_order} / ${current.sales}.`);
+          if (!g.sales_order && current.sales) g.sales_order = current.sales;
+          if (!g.customer_name && current.customer) g.customer_name = current.customer;
+          if (!g.scheduled_date && current.date) g.scheduled_date = current.date;
+          g.errors.push(...rowErrors.map(x => `Fila ${ri+1}: ${x}`));
+
+          if (!rowErrors.length) {
+            const prev = g.linesMap.get(sku) || 0;
+            g.linesMap.set(sku, prev + Math.trunc(pieces));
+          }
+        }
+
+        const orders = [...grouped.values()].map(g => {
+          if (!g.sales_order) g.errors.push('Orden de venta vacía.');
+          if (!g.customer_name) g.errors.push('Cliente vacío.');
+          const lines = [...g.linesMap.entries()].map(([sku,requested_pieces]) => ({sku,requested_pieces}));
+          if (!lines.length) g.errors.push('Pedido sin líneas válidas.');
+          return {
+            delivery_reference:g.delivery_reference,
+            sales_order:g.sales_order,
+            customer_name:g.customer_name,
+            scheduled_date:g.scheduled_date,
+            lines,
+            total_pieces:lines.reduce((a,x)=>a+x.requested_pieces,0),
+            errors:[...new Set(g.errors)]
+          };
+        });
+        resolve({orders, errors:globalErrors});
+      } catch(err) { reject(err); }
+    };
+    reader.readAsArrayBuffer(file);
+  });
+}
+
+function renderOrderImportPreview(globalErrors=[]) {
+  const body = $('#orderPreviewBody');
+  if (!body) return;
+  body.innerHTML = orderImportPreview.map(o => `<tr>
+    <td>${escapeHtml(o.delivery_reference)}</td>
+    <td>${escapeHtml(o.sales_order)}</td>
+    <td>${escapeHtml(o.customer_name)}</td>
+    <td>${escapeHtml(o.scheduled_date || '')}</td>
+    <td>${o.lines.length}</td>
+    <td>${Number(o.total_pieces||0).toLocaleString()}</td>
+    <td>${o.errors.length ? `<span class="import-bad">${escapeHtml(o.errors[0])}${o.errors.length>1?` (+${o.errors.length-1})`:''}</span>` : '<span class="import-ok">VÁLIDO</span>'}</td>
+  </tr>`).join('') || '<tr><td colspan="7" class="empty">No se encontraron pedidos.</td></tr>';
+
+  const allErrors = [...globalErrors, ...orderImportPreview.flatMap(o => o.errors.map(e => `${o.delivery_reference}: ${e}`))];
+  const box = $('#orderImportErrors');
+  if (allErrors.length) {
+    box.classList.remove('hidden');
+    box.innerHTML = `<b>Validaciones:</b><br>${allErrors.slice(0,20).map(escapeHtml).join('<br>')}${allErrors.length>20?`<br>… y ${allErrors.length-20} más`:''}`;
+  } else box.classList.add('hidden');
+
+  const valid = orderImportPreview.filter(o=>!o.errors.length);
+  $('#orderImportStatus').textContent = `${valid.length} válidos / ${orderImportPreview.length} pedidos`;
+  $('#importOrdersExcel').disabled = valid.length === 0;
+}
+
+async function previewOrdersExcel() {
+  const file = $('#ordersExcelFile')?.files?.[0];
+  if (!file) return alert('Selecciona un archivo Excel.');
+  $('#orderImportStatus').textContent = 'Leyendo…';
+  try {
+    const parsed = await parseOrdersWorkbook(file);
+    orderImportPreview = parsed.orders;
+    renderOrderImportPreview(parsed.errors);
+  } catch(err) {
+    console.error(err);
+    orderImportPreview = [];
+    $('#importOrdersExcel').disabled = true;
+    $('#orderImportStatus').textContent = 'Error';
+    alert('No se pudo leer el archivo de pedidos.\n\n' + err.message);
+  }
+}
+
+async function importOrdersExcel() {
+  const file = $('#ordersExcelFile')?.files?.[0];
+  const valid = orderImportPreview.filter(o=>!o.errors.length);
+  if (!file || !valid.length) return;
+  const btn = $('#importOrdersExcel');
+  btn.disabled = true; btn.textContent = 'Importando…';
+  let ok=0, failed=[];
+  try {
+    for (const o of valid) {
+      const {error} = await db.rpc('import_wms_order', {
+        p_delivery_reference:o.delivery_reference,
+        p_sales_order:o.sales_order,
+        p_customer_name:o.customer_name,
+        p_scheduled_date:o.scheduled_date ? `${o.scheduled_date}T12:00:00` : null,
+        p_source_file:file.name,
+        p_lines:o.lines,
+        p_operator_name:'supervisor'
+      });
+      if (error) failed.push(`${o.delivery_reference}: ${error.message}`);
+      else ok++;
+    }
+    await refreshOrdersPicklists();
+    await refreshDashboardSnapshot();
+    alert(`Importación terminada.\nPedidos importados: ${ok}${failed.length?`\nCon error: ${failed.length}\n\n${failed.slice(0,8).join('\n')}`:''}`);
+  } finally {
+    btn.disabled = false; btn.textContent = 'Importar pedidos válidos';
+  }
+}
+
+async function refreshOrdersPicklists() {
+  try {
+    const [ordersRes,pickRes] = await Promise.all([
+      db.from('orders_wms_view').select('*').order('imported_at',{ascending:false}),
+      db.from('picklists_wms_view').select('*').order('generated_at',{ascending:false})
+    ]);
+    if (ordersRes.error) throw ordersRes.error;
+    if (pickRes.error) throw pickRes.error;
+    orderRows = ordersRes.data || [];
+    picklistRows = pickRes.data || [];
+    renderOrders();
+    renderPicklists();
+  } catch(err) {
+    console.warn('Pedidos/Picklists aún no disponibles:', err.message);
+  }
+}
+
+function renderOrders() {
+  const body=$('#ordersBody');
+  if(!body) return;
+  body.innerHTML = orderRows.map(o => {
+    const canGenerate = !o.picklist_id && !['CANCELADO','CERRADO','SURTIDO_COMPLETO','SURTIDO_PARCIAL'].includes(o.status);
+    return `<tr>
+      <td><b>${escapeHtml(o.delivery_reference)}</b></td><td>${escapeHtml(o.sales_order)}</td><td>${escapeHtml(o.customer_name)}</td>
+      <td>${Number(o.minimum_shelf_life_days||245)} días</td>
+      <td>${Number(o.requested_pieces||0).toLocaleString()}</td><td>${Number(o.reserved_pieces||0).toLocaleString()}</td><td>${Number(o.pending_pieces||0).toLocaleString()}</td>
+      <td><span class="order-status">${escapeHtml(o.status)}</span></td>
+      <td>${canGenerate?`<button class="mini primary generate-picklist" data-id="${escapeHtml(o.order_id)}">Generar picklist</button>`:o.picklist_folio?`<button class="mini view-order-picklist" data-pick="${escapeHtml(o.picklist_id)}">${escapeHtml(o.picklist_folio)}</button>`:'—'}</td>
+    </tr>`;
+  }).join('') || '<tr><td colspan="9" class="empty">No hay pedidos importados.</td></tr>';
+  body.querySelectorAll('.generate-picklist').forEach(b=>b.onclick=()=>generatePicklist(b.dataset.id,b));
+  body.querySelectorAll('.view-order-picklist').forEach(b=>b.onclick=()=>openPicklistFromOrders(b.dataset.pick));
+}
+
+async function generatePicklist(orderId, btn) {
+  if (!confirm('Se reservará inventario inmediatamente usando FEFO. ¿Generar picklist?')) return;
+  const old=btn.textContent; btn.disabled=true; btn.textContent='Reservando…';
+  try {
+    const {data,error}=await db.rpc('generate_wms_picklist',{p_order_id:orderId,p_operator_name:'supervisor'});
+    if(error) throw error;
+    await refreshOperationalData();
+    alert(`Picklist generada.\nFolio: ${data.folio}\nSolicitado: ${Number(data.requested_pieces).toLocaleString()} piezas\nReservado: ${Number(data.reserved_pieces).toLocaleString()} piezas\nFaltante: ${Number(data.shortage_pieces).toLocaleString()} piezas\nVida mínima: ${data.minimum_shelf_life_days} días.`);
+    openPicklistDetail(data.picklist_id);
+  } catch(err) {
+    console.error(err);
+    alert('No se pudo generar la picklist.\n\n'+err.message);
+  } finally { btn.disabled=false; btn.textContent=old; }
+}
+
+function renderPicklists() {
+  const body=$('#picklistsBody');
+  if(!body) return;
+  body.innerHTML=picklistRows.map(p=>`<tr>
+    <td><b>${escapeHtml(p.folio)}</b></td><td>${escapeHtml(p.delivery_reference)}</td><td>${escapeHtml(p.customer_name)}</td>
+    <td>${Number(p.line_count||0)}</td><td>${Number(p.reserved_pieces||0).toLocaleString()}</td><td>${Number(p.confirmed_pieces||0).toLocaleString()}</td>
+    <td><span class="order-status">${escapeHtml(p.status)}</span></td>
+    <td><button class="mini pick-detail" data-id="${escapeHtml(p.picklist_id)}">Ver / imprimir</button></td>
+  </tr>`).join('') || '<tr><td colspan="8" class="empty">No hay picklists generadas.</td></tr>';
+  body.querySelectorAll('.pick-detail').forEach(b=>b.onclick=()=>openPicklistDetail(b.dataset.id));
+}
+
+async function openPicklistFromOrders(id) {
+  $$('nav button').forEach(x=>x.classList.toggle('active',x.dataset.view==='picklists'));
+  $$('.view').forEach(v=>v.classList.add('hidden'));
+  $('#picklists').classList.remove('hidden');
+  $('#title').textContent='Picklists';
+  await openPicklistDetail(id);
+}
+
+async function openPicklistDetail(id) {
+  const {data,error}=await db.from('picklist_detail_wms_view').select('*').eq('picklist_id',id)
+    .order('expiration_date',{ascending:true}).order('level',{ascending:true}).order('location',{ascending:true});
+  if(error) return alert('No se pudo cargar la picklist.\n\n'+error.message);
+  currentPicklistDetail=data||[]; currentPicklistId=id;
+  const header=picklistRows.find(p=>String(p.picklist_id)===String(id));
+  $('#picklistDetailTitle').textContent=`Picklist ${header?.folio || ''}`;
+  $('#picklistDetailSub').textContent=header?`${header.delivery_reference} · ${header.customer_name} · ${header.status}`:'';
+  $('#picklistDetailBody').innerHTML=currentPicklistDetail.map((x,i)=>`<tr>
+    <td>${i+1}</td><td><b>${escapeHtml(x.location)}</b></td><td>${escapeHtml(x.sku)}</td><td>${escapeHtml(x.description)}</td>
+    <td>${escapeHtml(x.lot)}</td><td>${escapeHtml(x.expiration_date)}</td><td>${Number(x.days_remaining)}</td><td><b>${Number(x.reserved_pieces||0).toLocaleString()}</b></td>
+  </tr>`).join('') || '<tr><td colspan="8" class="empty">Sin líneas.</td></tr>';
+  $('#picklistDetailPanel').classList.remove('hidden');
+  $('#picklistDetailPanel').scrollIntoView({behavior:'smooth',block:'start'});
+}
+
+function printCurrentPicklist() {
+  if(!currentPicklistDetail.length) return;
+  const header=picklistRows.find(p=>String(p.picklist_id)===String(currentPicklistId));
+  const rows=currentPicklistDetail.map((x,i)=>`<tr><td>${i+1}</td><td>${escapeHtml(x.location)}</td><td>${escapeHtml(x.sku)}</td><td>${escapeHtml(x.description)}</td><td>${escapeHtml(x.lot)}</td><td>${escapeHtml(x.expiration_date)}</td><td>${Number(x.reserved_pieces||0).toLocaleString()}</td></tr>`).join('');
+  const w=window.open('','_blank','width=1100,height=800');
+  if(!w) return alert('Permite ventanas emergentes para imprimir.');
+  w.document.write(`<!doctype html><html><head><meta charset="utf-8"><title>${escapeHtml(header?.folio||'Picklist')}</title><style>body{font-family:Arial,sans-serif;padding:28px;color:#111}h1{margin:0 0 5px}p{margin:4px 0 18px}table{width:100%;border-collapse:collapse;font-size:12px}th,td{border:1px solid #bbb;padding:7px;text-align:left}th{background:#eee}.sign{display:grid;grid-template-columns:1fr 1fr;gap:80px;margin-top:60px}.sign div{border-top:1px solid #333;text-align:center;padding-top:6px}</style></head><body><h1>WMS Acatlán · Picklist ${escapeHtml(header?.folio||'')}</h1><p>Pedido: <b>${escapeHtml(header?.delivery_reference||'')}</b> · OV: ${escapeHtml(header?.sales_order||'')} · Cliente: ${escapeHtml(header?.customer_name||'')}</p><table><thead><tr><th>#</th><th>Ubicación</th><th>SKU</th><th>Producto</th><th>Lote</th><th>Caducidad</th><th>Piezas</th></tr></thead><tbody>${rows}</tbody></table><div class="sign"><div>Surtidor</div><div>Supervisor</div></div><script>window.onload=()=>window.print()<\/script></body></html>`);
+  w.document.close();
+}
+
+$('#previewOrdersExcel')?.addEventListener('click',previewOrdersExcel);
+$('#importOrdersExcel')?.addEventListener('click',importOrdersExcel);
+$('#refreshOrders')?.addEventListener('click',refreshOrdersPicklists);
+$('#refreshPicklists')?.addEventListener('click',refreshOrdersPicklists);
+$('#closePicklistDetail')?.addEventListener('click',()=>$('#picklistDetailPanel')?.classList.add('hidden'));
+$('#printPicklist')?.addEventListener('click',printCurrentPicklist);
+
