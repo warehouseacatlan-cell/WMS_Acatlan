@@ -13,6 +13,7 @@ let lastConfirmedReceipt = null;
 let qualitySelected = null;
 let qualityTab = 'PENDING';
 let qualityMode = 'PENDING';
+let dashboardSnapshot = null;
 
 const $ = s => document.querySelector(s);
 const $$ = s => [...document.querySelectorAll(s)];
@@ -72,7 +73,7 @@ async function init() {
     $('#recDate').value = localDateISO();
     $('#prodDate').value = localDateISO();
     await refreshOperationalData();
-    setConnectionState(`Supabase conectado · ${products.length} productos · ${locations.length} ubicaciones · Calidad/Bloqueo v2`, 'ok');
+    setConnectionState(`Supabase conectado · ${products.length} productos · ${locations.length} ubicaciones · Dashboard v2`, 'ok');
   } catch (err) {
     console.error(err);
     setConnectionState('Error de conexión', 'error');
@@ -92,6 +93,7 @@ async function refreshOperationalData() {
     renderInventory();
     renderQuality();
     renderExpiry(expiryRows || []);
+    await refreshDashboardSnapshot();
   } catch (err) {
     console.warn('Datos operativos todavía no disponibles:', err.message);
   }
@@ -730,6 +732,103 @@ $('#closeQualityModal')?.addEventListener('click', closeQualityModal);
 $('#cancelQuality')?.addEventListener('click', closeQualityModal);
 $('#confirmQuality')?.addEventListener('click', confirmQualityAction);
 $('#qualityModal')?.addEventListener('click', e => { if (e.target.id === 'qualityModal') closeQualityModal(); });
+
+async function refreshDashboardSnapshot() {
+  try {
+    const { data, error } = await db.rpc('get_dashboard_snapshot');
+    if (error) throw error;
+    dashboardSnapshot = data || {};
+    renderDashboardSnapshot(dashboardSnapshot);
+  } catch (err) {
+    console.warn('RPC dashboard no disponible; usando cálculo local:', err.message);
+    dashboardSnapshot = buildLocalDashboardSnapshot();
+    renderDashboardSnapshot(dashboardSnapshot);
+  }
+}
+
+function buildLocalDashboardSnapshot() {
+  const activeInv = inventoryRows.filter(x => Number(x.physical_pieces || 0) > 0);
+  const inventory = activeInv.reduce((a,x) => {
+    a.physical += Number(x.physical_pieces || 0);
+    a.pending += Number(x.pending_quality_pieces || 0);
+    a.released += Number(x.released_pieces || 0);
+    a.blocked += Number(x.blocked_pieces || 0);
+    a.reserved += Number(x.reserved_pieces || 0);
+    a.available += Number(x.available_pieces || 0);
+    if (Number(x.days_remaining) < 245) a.ineligible_245 += Number(x.available_pieces || 0);
+    return a;
+  }, {physical:0,pending:0,released:0,blocked:0,reserved:0,available:0,ineligible_245:0});
+
+  const locRows = storageStatus.length ? storageStatus : locations.map(l => ({...l, code:l.ubicacion, capacity_pallets:l.capacidad, occupied_positions:0, available_positions:l.capacidad, status:l.estatus, location_type:l.location_type}));
+  const loc = locRows.reduce((a,x) => {
+    const cap = Number(x.capacity_pallets ?? x.capacidad ?? 0);
+    const occ = Number(x.occupied_positions || 0);
+    const blocked = String(x.status || '').toUpperCase() === 'BLOQUEADA';
+    a.total += 1; a.capacity += cap; a.occupied_positions += occ;
+    if (blocked) a.blocked += 1;
+    else if (occ > 0) a.occupied += 1;
+    else a.free += 1;
+    const t = normalizeStorageType(x.location_type, x.code || x.ubicacion);
+    a.types[t].capacity += cap; a.types[t].occupied_positions += occ;
+    return a;
+  }, {total:0,occupied:0,free:0,blocked:0,capacity:0,occupied_positions:0,types:{RACK:{capacity:0,occupied_positions:0},PISO:{capacity:0,occupied_positions:0}}});
+  loc.available_positions = Math.max(0, loc.capacity - loc.occupied_positions);
+  loc.types.RACK.available_positions = Math.max(0, loc.types.RACK.capacity - loc.types.RACK.occupied_positions);
+  loc.types.PISO.available_positions = Math.max(0, loc.types.PISO.capacity - loc.types.PISO.occupied_positions);
+
+  const storage = {RACK:{physical:0,occupied_positions:loc.types.RACK.occupied_positions,capacity:loc.types.RACK.capacity},PISO:{physical:0,occupied_positions:loc.types.PISO.occupied_positions,capacity:loc.types.PISO.capacity}};
+  activeInv.forEach(x => {
+    const t = normalizeStorageType(x.location_type, x.location);
+    storage[t].physical += Number(x.physical_pieces || 0);
+  });
+  return {inventory, locations:loc, storage, operations:{picklists:0,counts:0,adjustments:0,incidents:0}};
+}
+
+function setDashText(id, value) {
+  const el = document.getElementById(id);
+  if (el) el.textContent = Number(value || 0).toLocaleString();
+}
+
+function renderDashboardSnapshot(s) {
+  const inv = s?.inventory || {};
+  const loc = s?.locations || {};
+  const storage = s?.storage || {};
+  const ops = s?.operations || {};
+  setDashText('kpiPhysical', inv.physical);
+  setDashText('kpiAvailable', inv.available);
+  setDashText('kpiPendingQuality', inv.pending);
+  setDashText('kpiBlocked', inv.blocked);
+  setDashText('kpiReserved', inv.reserved);
+  setDashText('kpiIneligible245', inv.ineligible_245);
+  setDashText('kpiOccupiedLocations', loc.occupied);
+  setDashText('kpiFreeLocations', loc.free);
+  setDashText('kpiBlockedLocations', loc.blocked);
+  setDashText('kpiOccupiedPositions', loc.occupied_positions);
+  setDashText('kpiAvailablePositions', loc.available_positions);
+  setDashText('kpiCapacity', loc.capacity || locations.reduce((a,b)=>a+Number(b.capacidad||0),0));
+
+  const capacity = Number(loc.capacity || 0), occupied = Number(loc.occupied_positions || 0);
+  const pct = capacity > 0 ? Math.min(100, occupied / capacity * 100) : 0;
+  const pctEl = $('#warehouseOccupancyPct'); if (pctEl) pctEl.textContent = `${pct.toFixed(1)}% ocupado`;
+  const fill = $('#capacityBarFill'); if (fill) fill.style.width = `${pct}%`;
+  const barText = $('#capacityBarText'); if (barText) barText.textContent = `${occupied.toLocaleString()} / ${capacity.toLocaleString()} posiciones`;
+
+  const rack = storage.RACK || {}, floor = storage.PISO || {};
+  setDashText('rackPhysical', rack.physical); setDashText('rackPositions', rack.occupied_positions);
+  setDashText('floorPhysical', floor.physical); setDashText('floorPositions', floor.occupied_positions);
+  const rackCap=Number(rack.capacity||0), rackOcc=Number(rack.occupied_positions||0), floorCap=Number(floor.capacity||0), floorOcc=Number(floor.occupied_positions||0);
+  const rb=$('#rackBar'); if(rb) rb.style.width=`${rackCap?Math.min(100,rackOcc/rackCap*100):0}%`;
+  const fb=$('#floorBar'); if(fb) fb.style.width=`${floorCap?Math.min(100,floorOcc/floorCap*100):0}%`;
+  const rct=$('#rackCapacityText'); if(rct) rct.textContent=`${rackOcc.toLocaleString()} / ${rackCap.toLocaleString()} pos.`;
+  const fct=$('#floorCapacityText'); if(fct) fct.textContent=`${floorOcc.toLocaleString()} / ${floorCap.toLocaleString()} pos.`;
+
+  setDashText('dashPicklists', ops.picklists);
+  setDashText('dashCounts', ops.counts);
+  setDashText('dashAdjustments', ops.adjustments);
+  setDashText('dashIncidents', ops.incidents);
+}
+
+$('#refreshDashboard')?.addEventListener('click', refreshOperationalData);
 
 function renderExpiry(rows) {
   const map = Object.fromEntries(rows.map(x => [x.color, Number(x.total_pieces || 0)]));
