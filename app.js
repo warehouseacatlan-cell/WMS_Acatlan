@@ -11,6 +11,8 @@ let lines = [];
 let selected = null;
 let lastConfirmedReceipt = null;
 let qualitySelected = null;
+let qualityTab = 'PENDING';
+let qualityMode = 'PENDING';
 
 const $ = s => document.querySelector(s);
 const $$ = s => [...document.querySelectorAll(s)];
@@ -70,7 +72,7 @@ async function init() {
     $('#recDate').value = localDateISO();
     $('#prodDate').value = localDateISO();
     await refreshOperationalData();
-    setConnectionState(`Supabase conectado · ${products.length} productos · ${locations.length} ubicaciones · Calidad/Inventario v1`, 'ok');
+    setConnectionState(`Supabase conectado · ${products.length} productos · ${locations.length} ubicaciones · Calidad/Bloqueo v2`, 'ok');
   } catch (err) {
     console.error(err);
     setConnectionState('Error de conexión', 'error');
@@ -530,21 +532,51 @@ function renderInventory() {
   });
 }
 
+function getQualityTabRows() {
+  if (qualityTab === 'RELEASED') return inventoryRows.filter(x => Number(x.released_pieces) > 0);
+  if (qualityTab === 'BLOCKED') return inventoryRows.filter(x => Number(x.blocked_pieces) > 0);
+  return inventoryRows.filter(x => Number(x.pending_quality_pieces) > 0);
+}
+
+function setQualityTab(tab) {
+  qualityTab = tab;
+  $$('.quality-tab').forEach(b => b.classList.toggle('active', b.dataset.qualityTab === tab));
+  const help = $('#qualityTabHelp');
+  const qtyHeader = $('#qualityQtyHeader');
+  if (tab === 'RELEASED') {
+    help.textContent = 'Bloquea inventario que ya estaba liberado. No se pueden bloquear piezas reservadas.';
+    qtyHeader.textContent = 'Liberado';
+  } else if (tab === 'BLOCKED') {
+    help.textContent = 'Re-libera inventario bloqueado cuando Calidad lo autorice. Lotes ROJOS o VENCIDOS no pueden re-liberarse.';
+    qtyHeader.textContent = 'Bloqueado';
+  } else {
+    help.textContent = 'Libera o bloquea cantidades específicas que todavía están pendientes de Calidad.';
+    qtyHeader.textContent = 'Pendiente';
+  }
+  renderQuality();
+}
+
 function renderQuality() {
   const body = $('#qualityBody');
   if (!body) return;
   const q = normalizeText($('#qualityFilter')?.value || '');
-  let pending = inventoryRows.filter(x => Number(x.pending_quality_pieces) > 0);
-  if (q) pending = pending.filter(x => inventorySearchText(x).includes(q));
-  pending.sort((a,b) => Number(a.days_remaining) - Number(b.days_remaining) || String(a.sku).localeCompare(String(b.sku)));
-  body.innerHTML = pending.map(x => `<tr>
-    <td>${escapeHtml(x.sku)}</td><td>${escapeHtml(x.description)}</td><td>${escapeHtml(x.lot)}</td><td>${escapeHtml(x.location)}</td>
-    <td><b>${Number(x.pending_quality_pieces).toLocaleString()}</b></td><td>${Number(x.physical_pieces).toLocaleString()}</td>
-    <td>${escapeHtml(x.production_date)}</td><td>${escapeHtml(x.expiration_date)}</td><td>${Number(x.days_remaining).toLocaleString()}</td>
-    <td><span class="status-pill ${String(x.expiration_color).toLowerCase()}">${escapeHtml(x.expiration_color)}</span></td>
-    <td><button type="button" class="mini quality-process" data-id="${escapeHtml(x.inventory_id)}">Procesar</button></td>
-  </tr>`).join('') || '<tr><td colspan="11" class="empty">No hay inventario pendiente de Calidad</td></tr>';
-  $('#qualityCount').textContent = `${pending.length} pendientes`;
+  let rows = getQualityTabRows();
+  if (q) rows = rows.filter(x => inventorySearchText(x).includes(q));
+  rows.sort((a,b) => Number(a.days_remaining) - Number(b.days_remaining) || String(a.sku).localeCompare(String(b.sku)));
+  body.innerHTML = rows.map(x => {
+    const qty = qualityTab === 'RELEASED' ? Number(x.released_pieces) : qualityTab === 'BLOCKED' ? Number(x.blocked_pieces) : Number(x.pending_quality_pieces);
+    const reserved = Number(x.reserved_pieces || 0);
+    const actionLabel = qualityTab === 'RELEASED' ? 'Bloquear' : qualityTab === 'BLOCKED' ? 'Re-liberar' : 'Procesar';
+    const actionClass = qualityTab === 'RELEASED' ? 'quality-action-block' : qualityTab === 'BLOCKED' ? 'quality-action-release' : '';
+    return `<tr>
+      <td>${escapeHtml(x.sku)}</td><td>${escapeHtml(x.description)}</td><td>${escapeHtml(x.lot)}</td><td>${escapeHtml(x.location)}</td>
+      <td><b>${qty.toLocaleString()}</b></td><td>${Number(x.physical_pieces).toLocaleString()}</td><td>${reserved.toLocaleString()}</td>
+      <td>${escapeHtml(x.expiration_date)}</td><td>${Number(x.days_remaining).toLocaleString()}</td>
+      <td><span class="status-pill ${String(x.expiration_color).toLowerCase()}">${escapeHtml(x.expiration_color)}</span></td>
+      <td><button type="button" class="mini quality-process ${actionClass}" data-id="${escapeHtml(x.inventory_id)}">${actionLabel}</button></td>
+    </tr>`;
+  }).join('') || `<tr><td colspan="11" class="empty">No hay inventario en la pestaña ${qualityTab === 'PENDING' ? 'Pendiente' : qualityTab === 'RELEASED' ? 'Liberado' : 'Bloqueado'}</td></tr>`;
+  $('#qualityCount').textContent = `${rows.length} registros`;
   body.querySelectorAll('.quality-process').forEach(b => b.onclick = () => openQualityModal(b.dataset.id));
 }
 
@@ -552,17 +584,64 @@ function openQualityModal(inventoryId) {
   const x = inventoryRows.find(r => String(r.inventory_id) === String(inventoryId));
   if (!x) return alert('No se encontró el registro de inventario. Actualiza la pantalla.');
   qualitySelected = x;
+  qualityMode = qualityTab;
   $('#qualityItemInfo').innerHTML = `<b>${escapeHtml(x.sku)} — ${escapeHtml(x.description)}</b><br>Lote: <b>${escapeHtml(x.lot)}</b> · Ubicación: <b>${escapeHtml(x.location)}</b> · Caducidad: <b>${escapeHtml(x.expiration_date)}</b> · ${Number(x.days_remaining)} días`;
+  $('#qualityNotes').value = '';
+  $('#qualityWarning').classList.add('hidden');
+  $('#qualityWarning').textContent = '';
+  $('#qualityPendingFields').classList.toggle('hidden', qualityMode !== 'PENDING');
+  $('#qualityReclassFields').classList.toggle('hidden', qualityMode === 'PENDING');
   $('#qualityRelease').value = 0;
   $('#qualityBlock').value = 0;
-  $('#qualityNotes').value = '';
-  $('#qualityReason').value = 'LIBERACION CALIDAD';
-  $('#qualityPendingTotal').textContent = Number(x.pending_quality_pieces).toLocaleString();
-  const cannotRelease = Number(x.days_remaining) < 210;
-  $('#qualityRelease').disabled = cannotRelease;
-  $('#qualityWarning').classList.toggle('hidden', !cannotRelease);
-  $('#qualityWarning').textContent = cannotRelease ? `Este lote está ${x.expiration_color}. Con ${x.days_remaining} días restantes no puede liberarse; solo puede bloquearse o quedar pendiente.` : '';
-  if (cannotRelease) $('#qualityReason').value = 'CADUCIDAD';
+  $('#qualityReclassQty').value = 0;
+
+  if (qualityMode === 'RELEASED') {
+    const released = Number(x.released_pieces || 0);
+    const reserved = Number(x.reserved_pieces || 0);
+    const maxBlock = Math.max(0, released - reserved);
+    $('#qualityModalTitle').textContent = 'Bloquear inventario liberado';
+    $('#qualityReclassLabel').childNodes[0].nodeValue = 'Bloquear (piezas)';
+    $('#qualityReclassLimitLabel').textContent = 'Máximo bloqueable';
+    $('#qualityReclassLimit').textContent = maxBlock.toLocaleString();
+    $('#qualityPendingTotal').textContent = released.toLocaleString();
+    $('#qualityBaseTotalLabel').childNodes[0].nodeValue = 'Liberado actual: ';
+    $('#qualityRemainLabel').childNodes[0].nodeValue = 'Quedará liberado: ';
+    $('#qualityReason').value = 'RETENCION CALIDAD';
+    if (reserved > 0) {
+      $('#qualityWarning').classList.remove('hidden');
+      $('#qualityWarning').textContent = `${reserved.toLocaleString()} piezas están reservadas y no pueden bloquearse. Máximo bloqueable: ${maxBlock.toLocaleString()} piezas.`;
+    }
+  } else if (qualityMode === 'BLOCKED') {
+    const blocked = Number(x.blocked_pieces || 0);
+    $('#qualityModalTitle').textContent = 'Re-liberar inventario bloqueado';
+    $('#qualityReclassLabel').childNodes[0].nodeValue = 'Re-liberar (piezas)';
+    $('#qualityReclassLimitLabel').textContent = 'Máximo re-liberable';
+    $('#qualityReclassLimit').textContent = blocked.toLocaleString();
+    $('#qualityPendingTotal').textContent = blocked.toLocaleString();
+    $('#qualityBaseTotalLabel').childNodes[0].nodeValue = 'Bloqueado actual: ';
+    $('#qualityRemainLabel').childNodes[0].nodeValue = 'Quedará bloqueado: ';
+    $('#qualityReason').value = 'RELIBERACION CALIDAD';
+    if (Number(x.days_remaining) < 210) {
+      $('#qualityWarning').classList.remove('hidden');
+      $('#qualityWarning').textContent = `Este lote está ${x.expiration_color}. Con ${x.days_remaining} días restantes no puede re-liberarse.`;
+    }
+  } else {
+    $('#qualityModalTitle').textContent = 'Procesar Calidad pendiente';
+    const pending = Number(x.pending_quality_pieces || 0);
+    $('#qualityPendingTotal').textContent = pending.toLocaleString();
+    $('#qualityBaseTotalLabel').childNodes[0].nodeValue = 'Pendiente actual: ';
+    $('#qualityRemainLabel').childNodes[0].nodeValue = 'Quedará pendiente: ';
+    $('#qualityReason').value = 'LIBERACION CALIDAD';
+    const cannotRelease = Number(x.days_remaining) < 210;
+    $('#qualityRelease').disabled = cannotRelease;
+    if (cannotRelease) {
+      $('#qualityWarning').classList.remove('hidden');
+      $('#qualityWarning').textContent = `Este lote está ${x.expiration_color}. Con ${x.days_remaining} días restantes no puede liberarse; solo puede bloquearse o quedar pendiente.`;
+      $('#qualityReason').value = 'CADUCIDAD';
+    } else {
+      $('#qualityRelease').disabled = false;
+    }
+  }
   updateQualityTotals();
   $('#qualityModal').classList.remove('hidden');
 }
@@ -574,39 +653,62 @@ function closeQualityModal() {
 
 function updateQualityTotals() {
   if (!qualitySelected) return;
-  const release = Math.max(0, Number($('#qualityRelease').value || 0));
-  const block = Math.max(0, Number($('#qualityBlock').value || 0));
-  const total = release + block;
-  const pending = Number(qualitySelected.pending_quality_pieces || 0);
-  $('#qualityProcessTotal').textContent = total.toLocaleString();
-  $('#qualityRemainTotal').textContent = Math.max(0, pending - total).toLocaleString();
-  $('#qualityProcessTotal').classList.toggle('bad-number', total > pending);
+  let process = 0, base = 0;
+  if (qualityMode === 'PENDING') {
+    process = Math.max(0, Number($('#qualityRelease').value || 0)) + Math.max(0, Number($('#qualityBlock').value || 0));
+    base = Number(qualitySelected.pending_quality_pieces || 0);
+  } else if (qualityMode === 'RELEASED') {
+    process = Math.max(0, Number($('#qualityReclassQty').value || 0));
+    base = Number(qualitySelected.released_pieces || 0);
+  } else {
+    process = Math.max(0, Number($('#qualityReclassQty').value || 0));
+    base = Number(qualitySelected.blocked_pieces || 0);
+  }
+  $('#qualityProcessTotal').textContent = process.toLocaleString();
+  $('#qualityRemainTotal').textContent = Math.max(0, base - process).toLocaleString();
+  $('#qualityProcessTotal').classList.toggle('bad-number', process > base);
 }
 
 async function confirmQualityAction() {
   if (!qualitySelected) return;
-  const release = Math.max(0, Math.trunc(Number($('#qualityRelease').value || 0)));
-  const block = Math.max(0, Math.trunc(Number($('#qualityBlock').value || 0)));
-  const pending = Number(qualitySelected.pending_quality_pieces || 0);
-  if (release + block <= 0) return alert('Captura una cantidad a liberar o bloquear.');
-  if (release + block > pending) return alert(`No puedes procesar más de ${pending.toLocaleString()} piezas pendientes.`);
-  if (Number(qualitySelected.days_remaining) < 210 && release > 0) return alert('El inventario ROJO o VENCIDO no puede liberarse.');
-
   const btn = $('#confirmQuality');
   btn.disabled = true; btn.textContent = 'Guardando…';
   try {
-    const { data, error } = await db.rpc('process_quality', {
-      p_inventory_id: qualitySelected.inventory_id,
-      p_release_pieces: release,
-      p_block_pieces: block,
-      p_reason: $('#qualityReason').value,
-      p_observations: $('#qualityNotes').value.trim(),
-      p_operator_name: 'supervisor'
-    });
-    if (error) throw error;
-    closeQualityModal();
-    await refreshOperationalData();
-    alert(`Calidad registrada correctamente.\nLiberado: ${Number(data.released_now || 0).toLocaleString()} piezas\nBloqueado: ${Number(data.blocked_now || 0).toLocaleString()} piezas\nPendiente: ${Number(data.pending_remaining || 0).toLocaleString()} piezas`);
+    if (qualityMode === 'PENDING') {
+      const release = Math.max(0, Math.trunc(Number($('#qualityRelease').value || 0)));
+      const block = Math.max(0, Math.trunc(Number($('#qualityBlock').value || 0)));
+      const pending = Number(qualitySelected.pending_quality_pieces || 0);
+      if (release + block <= 0) throw new Error('Captura una cantidad a liberar o bloquear.');
+      if (release + block > pending) throw new Error(`No puedes procesar más de ${pending.toLocaleString()} piezas pendientes.`);
+      if (Number(qualitySelected.days_remaining) < 210 && release > 0) throw new Error('El inventario ROJO o VENCIDO no puede liberarse.');
+      const { data, error } = await db.rpc('process_quality', {
+        p_inventory_id: qualitySelected.inventory_id,
+        p_release_pieces: release,
+        p_block_pieces: block,
+        p_reason: $('#qualityReason').value,
+        p_observations: $('#qualityNotes').value.trim(),
+        p_operator_name: 'supervisor'
+      });
+      if (error) throw error;
+      closeQualityModal(); await refreshOperationalData();
+      alert(`Calidad registrada correctamente.\nLiberado: ${Number(data.released_now || 0).toLocaleString()} piezas\nBloqueado: ${Number(data.blocked_now || 0).toLocaleString()} piezas\nPendiente: ${Number(data.pending_remaining || 0).toLocaleString()} piezas`);
+    } else {
+      const qty = Math.max(0, Math.trunc(Number($('#qualityReclassQty').value || 0)));
+      if (qty <= 0) throw new Error('Captura una cantidad mayor a cero.');
+      const action = qualityMode === 'RELEASED' ? 'BLOCK_RELEASED' : 'RELEASE_BLOCKED';
+      const { data, error } = await db.rpc('reclassify_quality_inventory', {
+        p_inventory_id: qualitySelected.inventory_id,
+        p_action: action,
+        p_quantity_pieces: qty,
+        p_reason: $('#qualityReason').value,
+        p_observations: $('#qualityNotes').value.trim(),
+        p_operator_name: 'supervisor'
+      });
+      if (error) throw error;
+      closeQualityModal(); await refreshOperationalData();
+      const verb = qualityMode === 'RELEASED' ? 'bloqueadas' : 're-liberadas';
+      alert(`${Number(data.quantity || qty).toLocaleString()} piezas ${verb} correctamente.\nDisponible actual: ${Number(data.available_after || 0).toLocaleString()} piezas.`);
+    }
   } catch (err) {
     console.error(err);
     alert('No se pudo registrar Calidad. No se realizó ningún cambio.\n\n' + (err.message || err));
@@ -622,6 +724,8 @@ $('#refreshInventory')?.addEventListener('click', refreshOperationalData);
 $('#refreshQuality')?.addEventListener('click', refreshOperationalData);
 $('#qualityRelease')?.addEventListener('input', updateQualityTotals);
 $('#qualityBlock')?.addEventListener('input', updateQualityTotals);
+$('#qualityReclassQty')?.addEventListener('input', updateQualityTotals);
+$$('.quality-tab').forEach(b => b.addEventListener('click', () => setQualityTab(b.dataset.qualityTab)));
 $('#closeQualityModal')?.addEventListener('click', closeQualityModal);
 $('#cancelQuality')?.addEventListener('click', closeQualityModal);
 $('#confirmQuality')?.addEventListener('click', confirmQualityAction);
