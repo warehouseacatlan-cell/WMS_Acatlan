@@ -34,8 +34,8 @@ async function init() {
   setConnectionState('Conectando a Supabase…', 'loading');
   try {
     const [productRows, locationRows] = await Promise.all([
-      fetchAllRows('products', 'id,sku,description,base_unit,pieces_per_pallet,shelf_life_days,category,active', 'sku'),
-      fetchAllRows('locations', 'id,warehouse,code,rack,position,level,capacity_pallets,status,active', 'code')
+      fetchAllRows('products', 'id,sku,description,base_unit,pieces_per_pallet,shelf_life_days,category,storage_type,active', 'sku'),
+      fetchAllRows('locations', 'id,warehouse,code,rack,position,level,capacity_pallets,location_type,status,active', 'code')
     ]);
 
     products = productRows.filter(p => p.active !== false).map(p => ({
@@ -45,7 +45,8 @@ async function init() {
       unidad: p.base_unit,
       piezas_por_tarima: Number(p.pieces_per_pallet || 0),
       vida_util_dias: Number(p.shelf_life_days || 245),
-      categoria: p.category || ''
+      categoria: p.category || '',
+      storage_type: p.storage_type || ''
     }));
 
     locations = locationRows.filter(l => l.active !== false).map(l => ({
@@ -56,7 +57,8 @@ async function init() {
       posicion: l.position || '',
       nivel: Number(l.level || 0),
       capacidad: Number(l.capacity_pallets || 0),
-      estatus: l.status || 'DISPONIBLE'
+      estatus: l.status || 'DISPONIBLE',
+      location_type: l.location_type || ''
     }));
 
     $('#kpiProducts').textContent = products.length.toLocaleString();
@@ -197,7 +199,7 @@ function updateCalc() {
   const ppt = Number(selected.piezas_por_tarima || 0);
   if (!ppt) { $('#calc').textContent = 'Este producto no tiene piezas por tarima configuradas.'; return; }
   const pallets = Math.floor(pcs / ppt), rest = pcs % ppt, pos = pallets + (rest > 0 ? 1 : 0);
-  $('#calc').innerHTML = `<b>${pallets}</b> tarimas completas + <b>${rest}</b> piezas de resto = <b>${pos}</b> posiciones requeridas.`;
+  $('#calc').innerHTML = `<b>${pallets}</b> tarimas completas + <b>${rest}</b> piezas de resto = <b>${pos}</b> posiciones requeridas. <span class="storage-badge">Almacenamiento: ${escapeHtml(selected.storage_type || 'SIN CONFIGURAR')}</span>`;
 }
 
 $('#productSearch').addEventListener('focus', e => renderProductSuggestions(e.target.value));
@@ -266,7 +268,7 @@ function buildLocationCandidates(product, lot) {
       partialSpace,
       hasSameAssignment: Boolean(effectiveProduct && compatible)
     };
-  }).filter(x => x.status === 'DISPONIBLE' && x.compatible);
+  }).filter(x => x.status === 'DISPONIBLE' && x.compatible && String(x.location_type || '').toUpperCase() === String(product.storage_type || '').toUpperCase());
 }
 
 function suggestAllocations(product, lot, totalPieces) {
@@ -340,7 +342,7 @@ $('#autoAssign').onclick = () => {
   const lot = normalizeLot($('#lot').value);
   if (!pcs || !selected.piezas_por_tarima || !lot) return alert('Captura lote y una cantidad válida');
   const allocs = suggestAllocations(selected, lot, pcs);
-  if (!allocs.length) return alert('No hay capacidad compatible suficiente para este producto y lote.');
+  if (!allocs.length) return alert(`No hay capacidad compatible suficiente. El producto ${selected.sku} solo puede almacenarse en ${selected.storage_type || 'un tipo no configurado'}.`);
   setAssignmentPreview(allocs);
 };
 
@@ -356,7 +358,7 @@ $('#addLine').onclick = () => {
   let allocs = [];
   try { allocs = JSON.parse($('#autoAssign').dataset.allocations || '[]'); } catch {}
   if (!allocs.length) allocs = suggestAllocations(selected, lot, pcs);
-  if (!allocs.length) return alert('No hay capacidad compatible suficiente.');
+  if (!allocs.length) return alert(`No hay capacidad compatible suficiente. El producto ${selected.sku} solo puede almacenarse en ${selected.storage_type || 'un tipo no configurado'}.`);
 
   const pallets = Math.floor(pcs / ppt), rest = pcs % ppt, pos = pallets + (rest ? 1 : 0);
   const exp = addDaysISO(pd, selected.vida_util_dias);
