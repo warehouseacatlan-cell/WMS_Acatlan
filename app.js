@@ -65,9 +65,9 @@ async function init() {
       location_type: normalizeStorageType(l.location_type, l.code)
     }));
 
-    $('#kpiProducts').textContent = products.length.toLocaleString();
-    $('#kpiLocations').textContent = locations.length.toLocaleString();
-    $('#kpiCapacity').textContent = locations.reduce((a,b) => a + b.capacidad, 0).toLocaleString();
+    setDashText('kpiProducts', products.length);
+    setDashText('kpiLocations', locations.length);
+    setDashText('kpiCapacity', locations.reduce((a,b) => a + b.capacidad, 0));
     renderProducts();
     renderLocations();
     $('#recDate').value = localDateISO();
@@ -349,12 +349,12 @@ function finalizeAllocations(items, ppt) {
 
 function clearAssignmentPreview() {
   $('#autoAssign').dataset.allocations = '';
-  $('#assignmentPreview').textContent = '';
+  const preview = $('#assignmentPreview'); if (preview) preview.textContent = '';
 }
 
 function setAssignmentPreview(allocs) {
   $('#autoAssign').dataset.allocations = JSON.stringify(allocs);
-  $('#assignmentPreview').innerHTML = allocs.map(a => `<span class="assign-chip">${escapeHtml(a.code)} · ${a.pieces} pzas (${a.positions_used} pos.)</span>`).join('');
+  const preview = $('#assignmentPreview'); if (preview) preview.innerHTML = allocs.map(a => `<span class="assign-chip">${escapeHtml(a.code)} · ${a.pieces} pzas (${a.positions_used} pos.)</span>`).join('');
 }
 
 $('#autoAssign').onclick = () => {
@@ -832,8 +832,8 @@ $('#refreshDashboard')?.addEventListener('click', refreshOperationalData);
 
 function renderExpiry(rows) {
   const map = Object.fromEntries(rows.map(x => [x.color, Number(x.total_pieces || 0)]));
-  $('#expiryGreen').textContent = (map.VERDE || 0).toLocaleString();
-  $('#expiryYellow').textContent = (map.AMARILLO || 0).toLocaleString();
-  $('#expiryRed').textContent = (map.ROJO || 0).toLocaleString();
-  $('#expiryExpired').textContent = (map.VENCIDO || 0).toLocaleString();
+  setDashText('expiryGreen', map.VERDE || 0);
+  setDashText('expiryYellow', map.AMARILLO || 0);
+  setDashText('expiryRed', map.ROJO || 0);
+  setDashText('expiryExpired', map.VENCIDO || 0);
 }
