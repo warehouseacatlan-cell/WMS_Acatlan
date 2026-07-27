@@ -14,6 +14,7 @@ let qualitySelected = null;
 let qualityTab = 'PENDING';
 let qualityMode = 'PENDING';
 let dashboardSnapshot = null;
+let transferSelected = null;
 
 const $ = s => document.querySelector(s);
 const $$ = s => [...document.querySelectorAll(s)];
@@ -92,6 +93,7 @@ async function refreshOperationalData() {
     inventoryRows = invRows || [];
     renderInventory();
     renderQuality();
+    renderTransfers();
     renderExpiry(expiryRows || []);
     await refreshDashboardSnapshot();
   } catch (err) {
@@ -838,3 +840,184 @@ function renderExpiry(rows) {
   setDashText('expiryRed', map.ROJO || 0);
   setDashText('expiryExpired', map.VENCIDO || 0);
 }
+
+
+// ============================================================
+// TRANSFERENCIAS INTERNAS v1
+// ============================================================
+function transferBucketAvailable(x, bucket) {
+  if (bucket === 'PENDING') return Number(x.pending_quality_pieces || 0);
+  if (bucket === 'BLOCKED') return Number(x.blocked_pieces || 0);
+  return Math.max(0, Number(x.released_pieces || 0) - Number(x.reserved_pieces || 0));
+}
+
+function transferBucketLabel(bucket) {
+  return bucket === 'PENDING' ? 'Pendiente Calidad' : bucket === 'BLOCKED' ? 'Bloqueado' : 'Liberado disponible';
+}
+
+function renderTransfers() {
+  const body = $('#transferBody');
+  if (!body) return;
+  const bucket = $('#transferBucketFilter')?.value || 'RELEASED';
+  const q = normalizeText($('#transferFilter')?.value || '');
+  let rows = inventoryRows.filter(x => Number(x.physical_pieces || 0) > 0 && transferBucketAvailable(x, bucket) > 0);
+  if (q) rows = rows.filter(x => inventorySearchText(x).includes(q));
+  body.innerHTML = rows.map(x => {
+    const max = transferBucketAvailable(x, bucket);
+    const ppt = Number(x.pieces_per_pallet || 0);
+    const full = ppt ? Math.floor(max / ppt) : 0;
+    const rest = ppt ? max % ppt : max;
+    const locType = normalizeStorageType(x.location_type, x.location);
+    return `<tr>
+      <td>${escapeHtml(x.sku)}</td><td>${escapeHtml(x.description)}</td><td>${escapeHtml(x.lot)}</td>
+      <td>${escapeHtml(x.location)}</td><td><span class="transfer-origin-type">${escapeHtml(locType)}</span></td>
+      <td>${Number(x.physical_pieces||0).toLocaleString()}</td><td><b>${max.toLocaleString()}</b><br><span class="transfer-bucket ${bucket}">${transferBucketLabel(bucket)}</span></td>
+      <td>${full} T${rest ? ` + ${rest} pzas` : ''}</td>
+      <td><button type="button" class="mini transfer-open" data-id="${escapeHtml(x.inventory_id)}">Mover</button></td>
+    </tr>`;
+  }).join('') || '<tr><td colspan="9" class="empty">No hay inventario transferible con este filtro.</td></tr>';
+  $('#transferCount').textContent = `${rows.length} opciones`;
+  body.querySelectorAll('.transfer-open').forEach(b => b.onclick = () => openTransferModal(b.dataset.id));
+}
+
+function getStorageRowByLocationId(id) {
+  return storageStatus.find(x => String(x.id) === String(id)) || null;
+}
+
+function getTransferDestinationCandidates(x, qty) {
+  const sourceLoc = locations.find(l => l.ubicacion === x.location);
+  const product = products.find(p => String(p.sku) === String(x.sku));
+  if (!sourceLoc || !product) return [];
+  const productType = normalizeStorageType(product.storage_type);
+  const ppt = Number(x.pieces_per_pallet || product.piezas_por_tarima || 0);
+  if (!ppt || !qty) return [];
+
+  return locations.filter(l => {
+    if (String(l.id) === String(sourceLoc.id)) return false;
+    if (String(l.estatus || '').toUpperCase() !== 'DISPONIBLE') return false;
+    if (normalizeStorageType(l.location_type, l.ubicacion) !== productType) return false;
+    const st = getStorageRowByLocationId(l.id);
+    const assignedProductId = st?.product_id || null;
+    const assignedLot = st?.lot || null;
+    if (assignedProductId && (String(assignedProductId) !== String(product.id) || normalizeLot(assignedLot) !== normalizeLot(x.lot))) return false;
+    const existingPieces = Number(st?.physical_pieces || st?.total_physical_pieces || 0);
+    const positionsAfter = ceilDiv(existingPieces + Number(qty), ppt);
+    return positionsAfter <= Number(l.capacidad || 0);
+  }).map(l => {
+    const st = getStorageRowByLocationId(l.id);
+    const existingPieces = Number(st?.physical_pieces || st?.total_physical_pieces || 0);
+    const occupied = Number(st?.occupied_positions || 0);
+    const available = Math.max(0, Number(l.capacidad || 0) - occupied);
+    const positionsAfter = ceilDiv(existingPieces + Number(qty), ppt);
+    const addedPositions = Math.max(0, positionsAfter - occupied);
+    const exact = addedPositions === available;
+    const hasSame = existingPieces > 0;
+    return {...l, existingPieces, occupied, available, positionsAfter, addedPositions, exact, hasSame};
+  });
+}
+
+function sortTransferCandidates(candidates, x, qty) {
+  const ppt = Number(x.pieces_per_pallet || 0);
+  const isRemainder = Number(qty) % ppt !== 0 || Number(qty) < ppt;
+  const type = normalizeStorageType(x.location_type, x.location);
+  return [...candidates].sort((a,b) => {
+    if (a.hasSame !== b.hasSame) return a.hasSame ? -1 : 1;
+    if (a.exact !== b.exact) return a.exact ? -1 : 1;
+    if (type === 'RACK') {
+      if (isRemainder && a.nivel !== b.nivel) return Number(a.nivel) - Number(b.nivel);
+      if (!isRemainder && a.nivel !== b.nivel) return Number(b.nivel) - Number(a.nivel);
+    }
+    if (a.available !== b.available) return Number(a.available) - Number(b.available);
+    return String(a.ubicacion).localeCompare(String(b.ubicacion));
+  });
+}
+
+function openTransferModal(inventoryId) {
+  const x = inventoryRows.find(r => String(r.inventory_id) === String(inventoryId));
+  if (!x) return;
+  transferSelected = x;
+  const bucket = $('#transferBucketFilter')?.value || 'RELEASED';
+  const max = transferBucketAvailable(x, bucket);
+  $('#transferItemInfo').innerHTML = `<b>${escapeHtml(x.sku)} — ${escapeHtml(x.description)}</b><br>Lote: <b>${escapeHtml(x.lot)}</b> · Origen: <b>${escapeHtml(x.location)}</b> · Tipo: <b>${escapeHtml(normalizeStorageType(x.location_type, x.location))}</b>`;
+  $('#transferBucketLabel').value = transferBucketLabel(bucket);
+  $('#transferMax').value = max.toLocaleString();
+  $('#transferQty').value = '';
+  $('#transferQty').max = max;
+  $('#transferDestination').innerHTML = '<option value="">Captura cantidad primero</option>';
+  $('#transferDestinationInfo').textContent = 'Captura la cantidad a mover para calcular destinos válidos.';
+  $('#transferNotes').value = '';
+  $('#transferModal').classList.remove('hidden');
+}
+
+function refreshTransferDestinations(autoPick=false) {
+  if (!transferSelected) return;
+  const qty = Number($('#transferQty').value || 0);
+  const bucket = $('#transferBucketFilter')?.value || 'RELEASED';
+  const max = transferBucketAvailable(transferSelected, bucket);
+  const select = $('#transferDestination');
+  if (!qty || qty <= 0 || qty > max) {
+    select.innerHTML = '<option value="">Cantidad inválida</option>';
+    $('#transferDestinationInfo').textContent = `Máximo transferible: ${max.toLocaleString()} piezas.`;
+    return;
+  }
+  const previousDestination = select.value;
+  const candidates = sortTransferCandidates(getTransferDestinationCandidates(transferSelected, qty), transferSelected, qty);
+  select.innerHTML = '<option value="">Selecciona destino</option>' + candidates.map(c => `<option value="${escapeHtml(c.id)}">${escapeHtml(c.ubicacion)} · ${escapeHtml(c.location_type)} · ${c.available} pos. disp.${c.hasSame ? ' · mismo SKU+lote' : ''}</option>`).join('');
+  if (!candidates.length) {
+    $('#transferDestinationInfo').textContent = 'No existe una ubicación compatible con capacidad suficiente.';
+    return;
+  }
+  if (autoPick) select.value = candidates[0].id;
+  else if (candidates.some(c => String(c.id) === String(previousDestination))) select.value = previousDestination;
+  const chosen = candidates.find(c => String(c.id) === String(select.value)) || candidates[0];
+  const ppt = Number(transferSelected.pieces_per_pallet || 0);
+  const isRemainder = qty % ppt !== 0 || qty < ppt;
+  $('#transferDestinationInfo').innerHTML = `Sugerencia: <b>${escapeHtml(chosen.ubicacion)}</b> · ${isRemainder && normalizeStorageType(transferSelected.location_type, transferSelected.location)==='RACK' ? 'resto → nivel bajo' : 'almacenamiento → nivel alto/capacidad exacta'} · posiciones después: <b>${chosen.positionsAfter}</b> / ${chosen.capacidad}.`;
+}
+
+function closeTransferModal() {
+  $('#transferModal')?.classList.add('hidden');
+  transferSelected = null;
+}
+
+async function confirmTransfer() {
+  if (!transferSelected) return;
+  const qty = Number($('#transferQty').value || 0);
+  const destinationId = $('#transferDestination').value;
+  const bucket = $('#transferBucketFilter')?.value || 'RELEASED';
+  const max = transferBucketAvailable(transferSelected, bucket);
+  if (!qty || qty <= 0 || qty > max) return alert(`Cantidad inválida. Máximo: ${max.toLocaleString()} piezas.`);
+  if (!destinationId) return alert('Selecciona una ubicación destino.');
+  const btn = $('#confirmTransfer');
+  btn.disabled = true; btn.textContent = 'Transfiriendo…';
+  try {
+    const { data, error } = await db.rpc('confirm_internal_transfer', {
+      p_inventory_id: transferSelected.inventory_id,
+      p_destination_location_id: destinationId,
+      p_quantity_pieces: qty,
+      p_bucket: bucket,
+      p_reason: $('#transferReason').value,
+      p_observations: $('#transferNotes').value || null
+    });
+    if (error) throw error;
+    closeTransferModal();
+    await refreshOperationalData();
+    alert(`Transferencia confirmada.\nFolio: ${data?.folio || data || 'generado'}\nCantidad: ${qty.toLocaleString()} piezas.`);
+  } catch (err) {
+    console.error(err);
+    alert('No se realizó la transferencia. No se guardó ningún movimiento.\n\n' + err.message);
+  } finally {
+    btn.disabled = false; btn.textContent = 'Confirmar transferencia';
+  }
+}
+
+$('#transferFilter')?.addEventListener('input', renderTransfers);
+$('#transferBucketFilter')?.addEventListener('change', renderTransfers);
+$('#refreshTransfers')?.addEventListener('click', refreshOperationalData);
+$('#transferQty')?.addEventListener('input', () => refreshTransferDestinations(false));
+$('#suggestTransferDestination')?.addEventListener('click', () => refreshTransferDestinations(true));
+$('#transferDestination')?.addEventListener('change', () => refreshTransferDestinations(false));
+$('#closeTransferModal')?.addEventListener('click', closeTransferModal);
+$('#cancelTransfer')?.addEventListener('click', closeTransferModal);
+$('#confirmTransfer')?.addEventListener('click', confirmTransfer);
+$('#transferModal')?.addEventListener('click', e => { if (e.target.id === 'transferModal') closeTransferModal(); });
