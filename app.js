@@ -46,7 +46,7 @@ async function init() {
       piezas_por_tarima: Number(p.pieces_per_pallet || 0),
       vida_util_dias: Number(p.shelf_life_days || 245),
       categoria: p.category || '',
-      storage_type: p.storage_type || ''
+      storage_type: normalizeStorageType(p.storage_type)
     }));
 
     locations = locationRows.filter(l => l.active !== false).map(l => ({
@@ -58,7 +58,7 @@ async function init() {
       nivel: Number(l.level || 0),
       capacidad: Number(l.capacity_pallets || 0),
       estatus: l.status || 'DISPONIBLE',
-      location_type: l.location_type || ''
+      location_type: normalizeStorageType(l.location_type, l.code)
     }));
 
     $('#kpiProducts').textContent = products.length.toLocaleString();
@@ -69,7 +69,7 @@ async function init() {
     $('#recDate').value = localDateISO();
     $('#prodDate').value = localDateISO();
     await refreshOperationalData();
-    setConnectionState(`Supabase conectado · ${products.length} productos · ${locations.length} ubicaciones`, 'ok');
+    setConnectionState(`Supabase conectado · ${products.length} productos · ${locations.length} ubicaciones · RACK/PISO v2`, 'ok');
   } catch (err) {
     console.error(err);
     setConnectionState('Error de conexión', 'error');
@@ -142,6 +142,19 @@ function productLabel(p) { return `${p.sku} — ${p.descripcion}`; }
 function normalizeText(v) { return (v || '').toString().toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/[^a-z0-9]+/g,' ').trim(); }
 function escapeHtml(v) { return String(v ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
 function normalizeLot(v) { return String(v || '').trim().replace(/\s+/g,' ').toUpperCase(); }
+
+function normalizeStorageType(value, locationCode='') {
+  const raw = String(value || '').trim().toUpperCase();
+  if (raw === 'PISO' || raw === 'FILA') return 'PISO';
+  if (raw === 'RACK') return 'RACK';
+  return String(locationCode || '').trim().toUpperCase().startsWith('FILA-') ? 'PISO' : 'RACK';
+}
+
+function getLocationType(row) {
+  const master = locations.find(l => l.id === row.id);
+  return normalizeStorageType(row.location_type || master?.location_type, row.code || master?.ubicacion);
+}
+
 function localDateISO() { const d = new Date(); return new Date(d.getTime()-d.getTimezoneOffset()*60000).toISOString().slice(0,10); }
 function addDaysISO(iso, days) { const [y,m,d] = iso.split('-').map(Number); const x = new Date(Date.UTC(y,m-1,d)); x.setUTCDate(x.getUTCDate()+Number(days)); return x.toISOString().slice(0,10); }
 function ceilDiv(n,d) { return Math.ceil(Number(n)/Number(d)); }
@@ -268,7 +281,11 @@ function buildLocationCandidates(product, lot) {
       partialSpace,
       hasSameAssignment: Boolean(effectiveProduct && compatible)
     };
-  }).filter(x => x.status === 'DISPONIBLE' && x.compatible && String(x.location_type || '').toUpperCase() === String(product.storage_type || '').toUpperCase());
+  }).filter(x => {
+    const productType = normalizeStorageType(product.storage_type);
+    const locationType = getLocationType(x);
+    return x.status === 'DISPONIBLE' && x.compatible && locationType === productType;
+  });
 }
 
 function suggestAllocations(product, lot, totalPieces) {
@@ -343,6 +360,14 @@ $('#autoAssign').onclick = () => {
   if (!pcs || !selected.piezas_por_tarima || !lot) return alert('Captura lote y una cantidad válida');
   const allocs = suggestAllocations(selected, lot, pcs);
   if (!allocs.length) return alert(`No hay capacidad compatible suficiente. El producto ${selected.sku} solo puede almacenarse en ${selected.storage_type || 'un tipo no configurado'}.`);
+  const wrong = allocs.find(a => {
+    const row = storageStatus.find(x => x.id === a.location_id) || locations.find(x => x.id === a.location_id);
+    return getLocationType(row || {id:a.location_id, code:a.code}) !== normalizeStorageType(selected.storage_type);
+  });
+  if (wrong) {
+    clearAssignmentPreview();
+    return alert(`Asignación bloqueada: ${wrong.code} no corresponde a ${selected.storage_type}. Actualiza la página con Ctrl+F5.`);
+  }
   setAssignmentPreview(allocs);
 };
 
@@ -359,6 +384,11 @@ $('#addLine').onclick = () => {
   try { allocs = JSON.parse($('#autoAssign').dataset.allocations || '[]'); } catch {}
   if (!allocs.length) allocs = suggestAllocations(selected, lot, pcs);
   if (!allocs.length) return alert(`No hay capacidad compatible suficiente. El producto ${selected.sku} solo puede almacenarse en ${selected.storage_type || 'un tipo no configurado'}.`);
+  const wrong = allocs.find(a => {
+    const row = storageStatus.find(x => x.id === a.location_id) || locations.find(x => x.id === a.location_id);
+    return getLocationType(row || {id:a.location_id, code:a.code}) !== normalizeStorageType(selected.storage_type);
+  });
+  if (wrong) return alert(`Ubicación ${wrong.code} incompatible. ${selected.sku} requiere ${selected.storage_type}.`);
 
   const pallets = Math.floor(pcs / ppt), rest = pcs % ppt, pos = pallets + (rest ? 1 : 0);
   const exp = addDaysISO(pd, selected.vida_util_dias);
