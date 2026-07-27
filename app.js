@@ -10,6 +10,7 @@ let inventoryRows = [];
 let lines = [];
 let selected = null;
 let lastConfirmedReceipt = null;
+let qualitySelected = null;
 
 const $ = s => document.querySelector(s);
 const $$ = s => [...document.querySelectorAll(s)];
@@ -69,7 +70,7 @@ async function init() {
     $('#recDate').value = localDateISO();
     $('#prodDate').value = localDateISO();
     await refreshOperationalData();
-    setConnectionState(`Supabase conectado · ${products.length} productos · ${locations.length} ubicaciones · RACK/PISO v2`, 'ok');
+    setConnectionState(`Supabase conectado · ${products.length} productos · ${locations.length} ubicaciones · Calidad/Inventario v1`, 'ok');
   } catch (err) {
     console.error(err);
     setConnectionState('Error de conexión', 'error');
@@ -478,21 +479,153 @@ function printReceipt(r) {
   w.document.close();
 }
 
+function inventorySearchText(x) {
+  return normalizeText(`${x.sku} ${x.description} ${x.lot} ${x.location}`);
+}
+
 function renderInventory() {
   const body = $('#inventoryBody');
   if (!body) return;
-  const active = inventoryRows.filter(x => Number(x.physical_pieces) > 0);
-  body.innerHTML = active.map(x => `<tr><td>${escapeHtml(x.sku)}</td><td>${escapeHtml(x.description)}</td><td>${escapeHtml(x.lot)}</td><td>${escapeHtml(x.location)}</td><td>${Number(x.physical_pieces).toLocaleString()}</td><td>${Number(x.pending_quality_pieces).toLocaleString()}</td><td>${Number(x.available_pieces).toLocaleString()}</td><td>${Number(x.reserved_pieces).toLocaleString()}</td><td>${x.expiration_date}</td><td><span class="status-pill ${String(x.expiration_color).toLowerCase()}">${escapeHtml(x.expiration_color)}</span></td></tr>`).join('') || '<tr><td colspan="10" class="empty">Sin inventario</td></tr>';
+  const query = normalizeText($('#inventoryFilter')?.value || '');
+  const status = $('#inventoryStatusFilter')?.value || 'ALL';
+  let active = inventoryRows.filter(x => Number(x.physical_pieces) > 0);
+  if (query) active = active.filter(x => inventorySearchText(x).includes(query));
+  if (status === 'PENDING') active = active.filter(x => Number(x.pending_quality_pieces) > 0);
+  if (status === 'AVAILABLE') active = active.filter(x => Number(x.available_pieces) > 0);
+  if (status === 'BLOCKED') active = active.filter(x => Number(x.blocked_pieces) > 0);
+  if (status === 'RESERVED') active = active.filter(x => Number(x.reserved_pieces) > 0);
+
+  body.innerHTML = active.map(x => {
+    const physical = Number(x.physical_pieces || 0);
+    const ppt = Number(x.pieces_per_pallet || 0);
+    const pallets = Number(x.full_pallets ?? (ppt ? Math.floor(physical / ppt) : 0));
+    const rest = Number(x.remainder_pieces ?? (ppt ? physical % ppt : 0));
+    const tr = `${pallets} T${rest ? ` + ${rest} pzas` : ''}`;
+    return `<tr>
+      <td>${escapeHtml(x.sku)}</td><td>${escapeHtml(x.description)}</td><td>${escapeHtml(x.lot)}</td><td>${escapeHtml(x.location)}</td>
+      <td>${physical.toLocaleString()}</td><td>${escapeHtml(tr)}</td>
+      <td>${Number(x.pending_quality_pieces || 0).toLocaleString()}</td>
+      <td>${Number(x.released_pieces || 0).toLocaleString()}</td>
+      <td>${Number(x.blocked_pieces || 0).toLocaleString()}</td>
+      <td>${Number(x.reserved_pieces || 0).toLocaleString()}</td>
+      <td><b>${Number(x.available_pieces || 0).toLocaleString()}</b></td>
+      <td>${escapeHtml(x.expiration_date)}</td><td>${Number(x.days_remaining).toLocaleString()}</td>
+      <td><span class="status-pill ${String(x.expiration_color).toLowerCase()}">${escapeHtml(x.expiration_color)}</span></td>
+    </tr>`;
+  }).join('') || '<tr><td colspan="14" class="empty">Sin inventario para el filtro seleccionado</td></tr>';
   $('#inventoryCount').textContent = `${active.length} registros`;
+
+  const totals = inventoryRows.filter(x => Number(x.physical_pieces) > 0).reduce((a,x) => {
+    a.physical += Number(x.physical_pieces || 0);
+    a.pending += Number(x.pending_quality_pieces || 0);
+    a.released += Number(x.released_pieces || 0);
+    a.blocked += Number(x.blocked_pieces || 0);
+    a.reserved += Number(x.reserved_pieces || 0);
+    a.available += Number(x.available_pieces || 0);
+    return a;
+  }, {physical:0,pending:0,released:0,blocked:0,reserved:0,available:0});
+
+  [['#invPhysical','physical'],['#invPending','pending'],['#invReleased','released'],['#invBlocked','blocked'],['#invReserved','reserved'],['#invAvailable','available'],['#kpiPendingQuality','pending'],['#kpiReleased','released'],['#kpiBlocked','blocked'],['#kpiReserved','reserved'],['#kpiAvailable','available']].forEach(([sel,key]) => {
+    const el = $(sel); if (el) el.textContent = totals[key].toLocaleString();
+  });
 }
 
 function renderQuality() {
   const body = $('#qualityBody');
   if (!body) return;
-  const pending = inventoryRows.filter(x => Number(x.pending_quality_pieces) > 0);
-  body.innerHTML = pending.map(x => `<tr><td>${escapeHtml(x.sku)}</td><td>${escapeHtml(x.description)}</td><td>${escapeHtml(x.lot)}</td><td>${escapeHtml(x.location)}</td><td>${Number(x.pending_quality_pieces).toLocaleString()}</td><td>${x.production_date}</td><td>${x.expiration_date}</td></tr>`).join('') || '<tr><td colspan="7" class="empty">No hay inventario pendiente de Calidad</td></tr>';
+  const q = normalizeText($('#qualityFilter')?.value || '');
+  let pending = inventoryRows.filter(x => Number(x.pending_quality_pieces) > 0);
+  if (q) pending = pending.filter(x => inventorySearchText(x).includes(q));
+  pending.sort((a,b) => Number(a.days_remaining) - Number(b.days_remaining) || String(a.sku).localeCompare(String(b.sku)));
+  body.innerHTML = pending.map(x => `<tr>
+    <td>${escapeHtml(x.sku)}</td><td>${escapeHtml(x.description)}</td><td>${escapeHtml(x.lot)}</td><td>${escapeHtml(x.location)}</td>
+    <td><b>${Number(x.pending_quality_pieces).toLocaleString()}</b></td><td>${Number(x.physical_pieces).toLocaleString()}</td>
+    <td>${escapeHtml(x.production_date)}</td><td>${escapeHtml(x.expiration_date)}</td><td>${Number(x.days_remaining).toLocaleString()}</td>
+    <td><span class="status-pill ${String(x.expiration_color).toLowerCase()}">${escapeHtml(x.expiration_color)}</span></td>
+    <td><button type="button" class="mini quality-process" data-id="${escapeHtml(x.inventory_id)}">Procesar</button></td>
+  </tr>`).join('') || '<tr><td colspan="11" class="empty">No hay inventario pendiente de Calidad</td></tr>';
   $('#qualityCount').textContent = `${pending.length} pendientes`;
+  body.querySelectorAll('.quality-process').forEach(b => b.onclick = () => openQualityModal(b.dataset.id));
 }
+
+function openQualityModal(inventoryId) {
+  const x = inventoryRows.find(r => String(r.inventory_id) === String(inventoryId));
+  if (!x) return alert('No se encontró el registro de inventario. Actualiza la pantalla.');
+  qualitySelected = x;
+  $('#qualityItemInfo').innerHTML = `<b>${escapeHtml(x.sku)} — ${escapeHtml(x.description)}</b><br>Lote: <b>${escapeHtml(x.lot)}</b> · Ubicación: <b>${escapeHtml(x.location)}</b> · Caducidad: <b>${escapeHtml(x.expiration_date)}</b> · ${Number(x.days_remaining)} días`;
+  $('#qualityRelease').value = 0;
+  $('#qualityBlock').value = 0;
+  $('#qualityNotes').value = '';
+  $('#qualityReason').value = 'LIBERACION CALIDAD';
+  $('#qualityPendingTotal').textContent = Number(x.pending_quality_pieces).toLocaleString();
+  const cannotRelease = Number(x.days_remaining) < 210;
+  $('#qualityRelease').disabled = cannotRelease;
+  $('#qualityWarning').classList.toggle('hidden', !cannotRelease);
+  $('#qualityWarning').textContent = cannotRelease ? `Este lote está ${x.expiration_color}. Con ${x.days_remaining} días restantes no puede liberarse; solo puede bloquearse o quedar pendiente.` : '';
+  if (cannotRelease) $('#qualityReason').value = 'CADUCIDAD';
+  updateQualityTotals();
+  $('#qualityModal').classList.remove('hidden');
+}
+
+function closeQualityModal() {
+  $('#qualityModal')?.classList.add('hidden');
+  qualitySelected = null;
+}
+
+function updateQualityTotals() {
+  if (!qualitySelected) return;
+  const release = Math.max(0, Number($('#qualityRelease').value || 0));
+  const block = Math.max(0, Number($('#qualityBlock').value || 0));
+  const total = release + block;
+  const pending = Number(qualitySelected.pending_quality_pieces || 0);
+  $('#qualityProcessTotal').textContent = total.toLocaleString();
+  $('#qualityRemainTotal').textContent = Math.max(0, pending - total).toLocaleString();
+  $('#qualityProcessTotal').classList.toggle('bad-number', total > pending);
+}
+
+async function confirmQualityAction() {
+  if (!qualitySelected) return;
+  const release = Math.max(0, Math.trunc(Number($('#qualityRelease').value || 0)));
+  const block = Math.max(0, Math.trunc(Number($('#qualityBlock').value || 0)));
+  const pending = Number(qualitySelected.pending_quality_pieces || 0);
+  if (release + block <= 0) return alert('Captura una cantidad a liberar o bloquear.');
+  if (release + block > pending) return alert(`No puedes procesar más de ${pending.toLocaleString()} piezas pendientes.`);
+  if (Number(qualitySelected.days_remaining) < 210 && release > 0) return alert('El inventario ROJO o VENCIDO no puede liberarse.');
+
+  const btn = $('#confirmQuality');
+  btn.disabled = true; btn.textContent = 'Guardando…';
+  try {
+    const { data, error } = await db.rpc('process_quality', {
+      p_inventory_id: qualitySelected.inventory_id,
+      p_release_pieces: release,
+      p_block_pieces: block,
+      p_reason: $('#qualityReason').value,
+      p_observations: $('#qualityNotes').value.trim(),
+      p_operator_name: 'supervisor'
+    });
+    if (error) throw error;
+    closeQualityModal();
+    await refreshOperationalData();
+    alert(`Calidad registrada correctamente.\nLiberado: ${Number(data.released_now || 0).toLocaleString()} piezas\nBloqueado: ${Number(data.blocked_now || 0).toLocaleString()} piezas\nPendiente: ${Number(data.pending_remaining || 0).toLocaleString()} piezas`);
+  } catch (err) {
+    console.error(err);
+    alert('No se pudo registrar Calidad. No se realizó ningún cambio.\n\n' + (err.message || err));
+  } finally {
+    btn.disabled = false; btn.textContent = 'Confirmar Calidad';
+  }
+}
+
+$('#inventoryFilter')?.addEventListener('input', renderInventory);
+$('#inventoryStatusFilter')?.addEventListener('change', renderInventory);
+$('#qualityFilter')?.addEventListener('input', renderQuality);
+$('#refreshInventory')?.addEventListener('click', refreshOperationalData);
+$('#refreshQuality')?.addEventListener('click', refreshOperationalData);
+$('#qualityRelease')?.addEventListener('input', updateQualityTotals);
+$('#qualityBlock')?.addEventListener('input', updateQualityTotals);
+$('#closeQualityModal')?.addEventListener('click', closeQualityModal);
+$('#cancelQuality')?.addEventListener('click', closeQualityModal);
+$('#confirmQuality')?.addEventListener('click', confirmQualityAction);
+$('#qualityModal')?.addEventListener('click', e => { if (e.target.id === 'qualityModal') closeQualityModal(); });
 
 function renderExpiry(rows) {
   const map = Object.fromEntries(rows.map(x => [x.color, Number(x.total_pieces || 0)]));
