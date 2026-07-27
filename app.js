@@ -48,7 +48,7 @@ async function init() {
       descripcion: p.description,
       unidad: p.base_unit,
       piezas_por_tarima: Number(p.pieces_per_pallet || 0),
-      vida_util_dias: Number(p.shelf_life_days || 245),
+      vida_util_dias: Number(p.shelf_life_days || 360),
       categoria: p.category || '',
       storage_type: normalizeStorageType(p.storage_type)
     }));
@@ -515,8 +515,9 @@ function renderInventory() {
       <td><b>${Number(x.available_pieces || 0).toLocaleString()}</b></td>
       <td>${escapeHtml(x.expiration_date)}</td><td>${Number(x.days_remaining).toLocaleString()}</td>
       <td><span class="status-pill ${String(x.expiration_color).toLowerCase()}">${escapeHtml(x.expiration_color)}</span></td>
+      <td>${Number(x.available_pieces || 0) <= 0 ? '<span class="eligibility neutral">—</span>' : (Number(x.days_remaining) >= 245 ? '<span class="eligibility yes">ELEGIBLE</span>' : '<span class="eligibility no">NO SURTIR</span>')}</td>
     </tr>`;
-  }).join('') || '<tr><td colspan="14" class="empty">Sin inventario para el filtro seleccionado</td></tr>';
+  }).join('') || '<tr><td colspan="15" class="empty">Sin inventario para el filtro seleccionado</td></tr>';
   $('#inventoryCount').textContent = `${active.length} registros`;
 
   const totals = inventoryRows.filter(x => Number(x.physical_pieces) > 0).reduce((a,x) => {
