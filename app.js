@@ -1388,9 +1388,12 @@ function updatePickingTotals() {
     reserved += Number(tr.dataset.reserved||0);
     confirmed += Number(tr.querySelector('.pick-confirmed')?.value||0);
   });
-  setText('pickingReservedTotal',reserved.toLocaleString());
-  setText('pickingConfirmedTotal',confirmed.toLocaleString());
-  setText('pickingDifferenceTotal',(reserved-confirmed).toLocaleString());
+  const reservedEl = document.getElementById('pickingReservedTotal');
+  const confirmedEl = document.getElementById('pickingConfirmedTotal');
+  const differenceEl = document.getElementById('pickingDifferenceTotal');
+  if (reservedEl) reservedEl.textContent = reserved.toLocaleString();
+  if (confirmedEl) confirmedEl.textContent = confirmed.toLocaleString();
+  if (differenceEl) differenceEl.textContent = (reserved-confirmed).toLocaleString();
 }
 
 function syncPickingRow(tr) {
