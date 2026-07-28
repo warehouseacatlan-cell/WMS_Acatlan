@@ -1531,9 +1531,7 @@ document.addEventListener('click', async (event) => {
     await openPicklistDetail(picklistId);
   } catch (error) {
     console.error('Error al abrir picklist:', error);
-    alert('No se pudo abrir la picklist.
-
-' + (error?.message || error));
+    alert('No se pudo abrir la picklist.\n\n' + (error?.message || error));
   } finally {
     button.disabled = false;
     button.textContent = originalText;
