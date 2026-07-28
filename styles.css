@@ -49,3 +49,12 @@
 /* Confirmación de surtido v1 */
 .pick-user{display:block;color:#667;margin-top:3px}.pick-confirmed{width:90px;min-width:75px;padding:7px}.pick-incident,.pick-treatment{min-width:175px;padding:7px}.pick-notes{min-width:150px;padding:7px}.has-pick-difference{background:#fff8e7}.picking-totals{display:flex;justify-content:flex-end;gap:24px;padding:14px 4px;font-size:14px}.picking-totals span{padding:8px 12px;background:#f3f6fa;border-radius:8px}.detail-actions{flex-wrap:wrap}.detail-actions .hidden{display:none!important}
 @media(max-width:900px){.picking-totals{justify-content:flex-start;flex-wrap:wrap}.pick-incident,.pick-treatment,.pick-notes{min-width:140px}}
+
+/* Embarques v1 */
+.shipment-summary{display:grid;grid-template-columns:repeat(4,minmax(150px,1fr));gap:12px;margin-top:14px}
+.shipment-summary article{border:1px solid #dfe6ee;background:#f8fafc;border-radius:10px;padding:14px;display:flex;flex-direction:column;gap:4px}
+.shipment-summary b{font-size:24px}.shipment-summary span{font-size:12px;color:#5d6875}
+.shipment-warning{margin-top:14px;padding:12px 14px;border-radius:8px;background:#fff8e7;border:1px solid #ead7a4;color:#674f12}
+#shipmentFormPanel textarea{width:100%;box-sizing:border-box;margin-top:6px;padding:10px;border:1px solid #cfd8e3;border-radius:7px;font:inherit;resize:vertical}
+@media(max-width:900px){.shipment-summary{grid-template-columns:repeat(2,minmax(140px,1fr))}}
+@media(max-width:520px){.shipment-summary{grid-template-columns:1fr}}

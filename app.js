@@ -101,6 +101,7 @@ async function refreshOperationalData() {
     renderTransfers();
     renderExpiry(expiryRows || []);
     await refreshOrdersPicklists();
+    await refreshShipments();
     await refreshDashboardSnapshot();
   } catch (err) {
     console.warn('Datos operativos todavía no disponibles:', err.message);
@@ -1305,6 +1306,7 @@ async function importOrdersExcel() {
       else ok++;
     }
     await refreshOrdersPicklists();
+    await refreshShipments();
     await refreshDashboardSnapshot();
     alert(`Importación terminada.\nPedidos importados: ${ok}${failed.length?`\nCon error: ${failed.length}\n\n${failed.slice(0,8).join('\n')}`:''}`);
   } finally {
@@ -1542,6 +1544,143 @@ document.addEventListener('click', async (event) => {
     button.textContent = originalText;
   }
 });
+
+
+async function refreshShipments() {
+  const pendingBody=$('#shipmentsPendingBody');
+  const historyBody=$('#shipmentsHistoryBody');
+  if(!pendingBody || !historyBody) return;
+  try {
+    const {data,error}=await db.from('shipments_wms_view').select('*')
+      .order('picked_at',{ascending:false,nullsFirst:false});
+    if(error) throw error;
+    shipmentRows=data||[];
+    renderShipments();
+  } catch(err) {
+    console.warn('Embarques aún no disponibles:',err.message);
+    pendingBody.innerHTML=`<tr><td colspan="7" class="empty">Ejecuta el parche SQL de Embarques. ${escapeHtml(err.message)}</td></tr>`;
+  }
+}
+
+function shipmentPalletText(row) {
+  const full=Number(row.full_pallets||0);
+  const rests=Number(row.remainders||0);
+  const positions=Number(row.pallet_positions||0);
+  return `<b>${full}</b> completas${rests>0?` + <b>${rests}</b> resto(s)`:''}<small class="pick-user">${positions} posiciones</small>`;
+}
+
+function formatDurationMinutes(value) {
+  if(value===null || value===undefined || Number.isNaN(Number(value))) return '—';
+  const total=Math.max(0,Math.round(Number(value)));
+  const hours=Math.floor(total/60);
+  const minutes=total%60;
+  return hours>0?`${hours} h ${minutes} min`:`${minutes} min`;
+}
+
+function renderShipments() {
+  const pending=shipmentRows.filter(x=>x.shipping_state==='PENDIENTE');
+  const history=shipmentRows.filter(x=>x.shipping_state==='EMBARCADA');
+  const today=localDateISO();
+
+  const pendingBody=$('#shipmentsPendingBody');
+  pendingBody.innerHTML=pending.map(x=>`<tr>
+    <td><b>${escapeHtml(x.picklist_folio)}</b><small class="pick-user">${escapeHtml(x.picking_status)}</small></td>
+    <td>${escapeHtml(x.delivery_reference)}<small class="pick-user">${escapeHtml(x.sales_order||'')}</small></td>
+    <td>${escapeHtml(x.customer_name)}</td>
+    <td>${x.picked_at?new Date(x.picked_at).toLocaleString():'—'}<small class="pick-user">${escapeHtml(x.picked_by_name||'')}</small></td>
+    <td>${shipmentPalletText(x)}</td>
+    <td>${Number(x.confirmed_pieces||0).toLocaleString()}</td>
+    <td><button class="mini primary open-shipment" data-id="${escapeHtml(x.picklist_id)}">Confirmar salida</button></td>
+  </tr>`).join('') || '<tr><td colspan="7" class="empty">No hay picklists pendientes de embarcar.</td></tr>';
+
+  const historyBody=$('#shipmentsHistoryBody');
+  historyBody.innerHTML=history.map(x=>`<tr>
+    <td>${x.shipment_confirmed_at?new Date(x.shipment_confirmed_at).toLocaleString():'—'}<small class="pick-user">${escapeHtml(x.operator_name||'')}</small></td>
+    <td><b>${escapeHtml(x.picklist_folio)}</b></td>
+    <td>${escapeHtml(x.delivery_reference)}</td>
+    <td>${escapeHtml(x.customer_name)}</td>
+    <td>${Number(x.confirmed_pieces||0).toLocaleString()}</td>
+    <td>${shipmentPalletText(x)}</td>
+    <td>${escapeHtml(x.driver_name||'—')}<small class="pick-user">${escapeHtml(x.vehicle_plates||'Sin placas')}</small></td>
+    <td>${formatDurationMinutes(x.minutes_pick_to_ship)}</td>
+  </tr>`).join('') || '<tr><td colspan="8" class="empty">Sin embarques confirmados.</td></tr>';
+
+  const pendingPieces=pending.reduce((a,x)=>a+Number(x.confirmed_pieces||0),0);
+  const pendingPositions=pending.reduce((a,x)=>a+Number(x.pallet_positions||0),0);
+  const todayCount=history.filter(x=>String(x.shipment_confirmed_at||'').slice(0,10)===today).length;
+  const elPending=$('#shipmentPendingCount');
+  const elToday=$('#shipmentTodayCount');
+  const elPieces=$('#shipmentPiecesPending');
+  const elPositions=$('#shipmentPositionsPending');
+  if(elPending) elPending.textContent=pending.length.toLocaleString();
+  if(elToday) elToday.textContent=todayCount.toLocaleString();
+  if(elPieces) elPieces.textContent=pendingPieces.toLocaleString();
+  if(elPositions) elPositions.textContent=pendingPositions.toLocaleString();
+}
+
+function openShipmentForm(picklistId) {
+  const row=shipmentRows.find(x=>String(x.picklist_id)===String(picklistId));
+  if(!row) return alert('No se encontró la picklist para embarcar.');
+  if(row.shipping_state!=='PENDIENTE') return alert('Esta picklist ya fue embarcada.');
+  currentShipmentPicklistId=picklistId;
+  $('#shipmentFormTitle').textContent=`Confirmar embarque · ${row.picklist_folio}`;
+  $('#shipmentFormSubtitle').textContent=`Pedido ${row.delivery_reference} · ${row.customer_name} · ${Number(row.confirmed_pieces||0).toLocaleString()} piezas · ${Number(row.pallet_positions||0)} posiciones`;
+  $('#shipmentOperator').value='supervisor';
+  $('#shipmentDriver').value='';
+  $('#shipmentPlates').value='';
+  $('#shipmentNotes').value='';
+  $('#shipmentDatePreview').value=new Date().toLocaleString();
+  $('#shipmentFormPanel').classList.remove('hidden');
+  $('#shipmentFormPanel').scrollIntoView({behavior:'smooth',block:'start'});
+}
+
+async function confirmCurrentShipment() {
+  if(!currentShipmentPicklistId) return;
+  const operator=$('#shipmentOperator').value.trim();
+  if(!operator) return alert('Captura el responsable de embarque.');
+  const row=shipmentRows.find(x=>String(x.picklist_id)===String(currentShipmentPicklistId));
+  const message=`Se confirmará la salida física de ${row?.picklist_folio||'la picklist'}.\n\nPiezas: ${Number(row?.confirmed_pieces||0).toLocaleString()}\nPosiciones: ${Number(row?.pallet_positions||0)}\n\nEsta acción no vuelve a descontar inventario. ¿Continuar?`;
+  if(!confirm(message)) return;
+
+  const btn=$('#confirmShipment');
+  const old=btn.textContent;
+  btn.disabled=true;
+  btn.textContent='Confirmando…';
+  try {
+    const {data,error}=await db.rpc('confirm_wms_shipment',{
+      p_picklist_id:currentShipmentPicklistId,
+      p_operator_name:operator,
+      p_driver_name:$('#shipmentDriver').value.trim()||null,
+      p_vehicle_plates:$('#shipmentPlates').value.trim()||null,
+      p_observations:$('#shipmentNotes').value.trim()||null
+    });
+    if(error) throw error;
+    $('#shipmentFormPanel').classList.add('hidden');
+    currentShipmentPicklistId=null;
+    await refreshShipments();
+    alert(`Embarque confirmado.\nPicklist: ${data.folio}\nEstatus: ${data.shipment_status}\nResponsable: ${data.operator_name}`);
+  } catch(err) {
+    console.error(err);
+    alert('No se pudo confirmar el embarque.\n\n'+err.message);
+  } finally {
+    btn.disabled=false;
+    btn.textContent=old;
+  }
+}
+
+document.addEventListener('click',(event)=>{
+  const button=event.target.closest('.open-shipment');
+  if(!button) return;
+  openShipmentForm(button.dataset.id);
+});
+
+$('#refreshShipments')?.addEventListener('click',refreshShipments);
+$('#closeShipmentForm')?.addEventListener('click',()=>{
+  $('#shipmentFormPanel')?.classList.add('hidden');
+  currentShipmentPicklistId=null;
+});
+$('#confirmShipment')?.addEventListener('click',confirmCurrentShipment);
+
 
 $('#previewOrdersExcel')?.addEventListener('click',previewOrdersExcel);
 $('#importOrdersExcel')?.addEventListener('click',importOrdersExcel);
