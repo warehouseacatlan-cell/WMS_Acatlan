@@ -1371,7 +1371,7 @@ function renderPicklists() {
     <td><span class="order-status">${escapeHtml(p.status)}</span>${p.taken_by_name?`<small class="pick-user">Por ${escapeHtml(p.taken_by_name)}</small>`:''}</td>
     <td><button class="mini pick-detail" data-id="${escapeHtml(p.picklist_id)}">${['SURTIDA_COMPLETA','SURTIDA_PARCIAL'].includes(p.status)?'Ver':'Abrir surtido'}</button></td>
   </tr>`).join('') || '<tr><td colspan="8" class="empty">No hay picklists generadas.</td></tr>';
-  body.querySelectorAll('.pick-detail').forEach(b=>b.onclick=()=>openPicklistDetail(b.dataset.id));
+
 }
 
 async function openPicklistFromOrders(id) {
@@ -1510,6 +1510,35 @@ function printCurrentPicklist() {
   w.document.write(`<!doctype html><html><head><meta charset="utf-8"><title>${escapeHtml(header?.folio||'Picklist')}</title><style>body{font-family:Arial,sans-serif;padding:28px;color:#111}h1{margin:0 0 5px}p{margin:4px 0 18px}table{width:100%;border-collapse:collapse;font-size:12px}th,td{border:1px solid #bbb;padding:7px;text-align:left}th{background:#eee}.sign{display:grid;grid-template-columns:1fr 1fr;gap:80px;margin-top:60px}.sign div{border-top:1px solid #333;text-align:center;padding-top:6px}</style></head><body><h1>WMS Acatlán · Picklist ${escapeHtml(header?.folio||'')}</h1><p>Pedido: <b>${escapeHtml(header?.delivery_reference||'')}</b> · OV: ${escapeHtml(header?.sales_order||'')} · Cliente: ${escapeHtml(header?.customer_name||'')}</p><table><thead><tr><th>#</th><th>Ubicación</th><th>SKU</th><th>Producto</th><th>Lote</th><th>Caducidad</th><th>Piezas</th></tr></thead><tbody>${rows}</tbody></table><div class="sign"><div>Surtidor</div><div>Supervisor</div></div><script>window.onload=()=>window.print()<\/script></body></html>`);
   w.document.close();
 }
+
+
+// Evento delegado permanente para botones de picklist.
+// Funciona aunque la tabla se vuelva a dibujar después de actualizar datos.
+document.addEventListener('click', async (event) => {
+  const button = event.target.closest('.pick-detail');
+  if (!button) return;
+  event.preventDefault();
+  event.stopPropagation();
+  const picklistId = button.dataset.id;
+  if (!picklistId) {
+    alert('No se encontró el identificador de la picklist.');
+    return;
+  }
+  const originalText = button.textContent;
+  button.disabled = true;
+  button.textContent = 'Abriendo…';
+  try {
+    await openPicklistDetail(picklistId);
+  } catch (error) {
+    console.error('Error al abrir picklist:', error);
+    alert('No se pudo abrir la picklist.
+
+' + (error?.message || error));
+  } finally {
+    button.disabled = false;
+    button.textContent = originalText;
+  }
+});
 
 $('#previewOrdersExcel')?.addEventListener('click',previewOrdersExcel);
 $('#importOrdersExcel')?.addEventListener('click',importOrdersExcel);
