@@ -1034,7 +1034,11 @@ $('#transferModal')?.addEventListener('click', e => { if (e.target.id === 'trans
 // PEDIDOS + PICKLIST v1
 // ============================================================
 function normalizeOrderHeader(v) {
-  return normalizeText(v).replace(/\s+/g,' ').trim();
+  return normalizeText(v)
+    .replace(/[\/\\_+]+/g,' ')
+    .replace(/[^a-z0-9\s]/g,' ')
+    .replace(/\s+/g,' ')
+    .trim();
 }
 
 function orderCell(row, idx) {
@@ -1117,20 +1121,42 @@ function parseOrdersWorkbook(file) {
         const rows = window.XLSX.utils.sheet_to_json(ws, {header:1, defval:'', raw:true});
         const headerIndex = rows.findIndex(r => {
           const h = r.map(normalizeOrderHeader);
-          return h.some(x => x.includes('referencia de entrega')) &&
-                 h.some(x => x === 'producto' || x.includes('producto')) &&
-                 h.some(x => x === 'demanda' || x.includes('demanda'));
+          return h.some(x => x.includes('referencia')) &&
+                 h.some(x => x.includes('producto')) &&
+                 h.some(x => x.includes('demanda')) &&
+                 h.some(x => x.includes('udm') || x.includes('unidad'));
         });
         if (headerIndex < 0) throw new Error('No encontré encabezados de Referencia de entrega / Producto / Demanda.');
 
         const headers = rows[headerIndex];
-        const cDate = findOrderColumn(headers,['Fecha programada','Fecha']);
-        const cRef = findOrderColumn(headers,['Referencia de entrega']);
-        const cSO = findOrderColumn(headers,['Orden de venta']);
-        const cCustomer = findOrderColumn(headers,['Cliente','Dirección de entrega','Direccion de entrega']);
-        const cProduct = findOrderColumn(headers,['Producto']);
-        const cDemand = findOrderColumn(headers,['Demanda']);
-        const cUnit = findOrderColumn(headers,['Unidad de medida','Unidad']);
+        const cDate = findOrderColumn(headers,[
+          'Movimientos de stock/Fecha programada',
+          'Fecha programada','Fecha'
+        ]);
+        const cRef = findOrderColumn(headers,[
+          'Movimientos de stock/Referencia',
+          'Referencia de entrega','Referencia'
+        ]);
+        const cSO = findOrderColumn(headers,[
+          'Orden de venta/Referencia de la orden',
+          'Orden de venta','Referencia de la orden'
+        ]);
+        const cCustomer = findOrderColumn(headers,[
+          'Orden de venta/+ Dirección de Entrega',
+          'Orden de venta/+ Direccion de Entrega',
+          'Dirección de Entrega','Direccion de Entrega','Cliente'
+        ]);
+        const cProduct = findOrderColumn(headers,[
+          'Movimientos de stock/Producto','Producto'
+        ]);
+        const cDemand = findOrderColumn(headers,[
+          'Movimientos de stock/Demanda','Demanda'
+        ]);
+        const cUnit = findOrderColumn(headers,[
+          'Movimientos de stock/UdM',
+          'Movimientos de stock/Unidad de medida',
+          'UdM','Unidad de medida','Unidad'
+        ]);
 
         const required = {Referencia:cRef,Orden:cSO,Cliente:cCustomer,Producto:cProduct,Demanda:cDemand,Unidad:cUnit};
         const missing = Object.entries(required).filter(([,idx]) => idx < 0).map(([k])=>k);
