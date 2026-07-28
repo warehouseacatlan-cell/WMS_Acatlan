@@ -1361,14 +1361,15 @@ async function generatePicklist(orderId, btn) {
   } finally { btn.disabled=false; btn.textContent=old; }
 }
 
+
 function renderPicklists() {
   const body=$('#picklistsBody');
   if(!body) return;
   body.innerHTML=picklistRows.map(p=>`<tr>
     <td><b>${escapeHtml(p.folio)}</b></td><td>${escapeHtml(p.delivery_reference)}</td><td>${escapeHtml(p.customer_name)}</td>
     <td>${Number(p.line_count||0)}</td><td>${Number(p.reserved_pieces||0).toLocaleString()}</td><td>${Number(p.confirmed_pieces||0).toLocaleString()}</td>
-    <td><span class="order-status">${escapeHtml(p.status)}</span></td>
-    <td><button class="mini pick-detail" data-id="${escapeHtml(p.picklist_id)}">Ver / imprimir</button></td>
+    <td><span class="order-status">${escapeHtml(p.status)}</span>${p.taken_by_name?`<small class="pick-user">Por ${escapeHtml(p.taken_by_name)}</small>`:''}</td>
+    <td><button class="mini pick-detail" data-id="${escapeHtml(p.picklist_id)}">${['SURTIDA_COMPLETA','SURTIDA_PARCIAL'].includes(p.status)?'Ver':'Abrir surtido'}</button></td>
   </tr>`).join('') || '<tr><td colspan="8" class="empty">No hay picklists generadas.</td></tr>';
   body.querySelectorAll('.pick-detail').forEach(b=>b.onclick=()=>openPicklistDetail(b.dataset.id));
 }
@@ -1381,20 +1382,123 @@ async function openPicklistFromOrders(id) {
   await openPicklistDetail(id);
 }
 
+function updatePickingTotals() {
+  let reserved=0, confirmed=0;
+  document.querySelectorAll('#picklistDetailBody tr[data-line-id]').forEach(tr=>{
+    reserved += Number(tr.dataset.reserved||0);
+    confirmed += Number(tr.querySelector('.pick-confirmed')?.value||0);
+  });
+  setText('pickingReservedTotal',reserved.toLocaleString());
+  setText('pickingConfirmedTotal',confirmed.toLocaleString());
+  setText('pickingDifferenceTotal',(reserved-confirmed).toLocaleString());
+}
+
+function syncPickingRow(tr) {
+  const reserved=Number(tr.dataset.reserved||0);
+  const input=tr.querySelector('.pick-confirmed');
+  let value=Math.trunc(Number(input.value||0));
+  if(value<0)value=0;
+  if(value>reserved)value=reserved;
+  input.value=value;
+  const hasDiff=value<reserved;
+  tr.querySelector('.pick-incident').disabled=!hasDiff;
+  tr.querySelector('.pick-treatment').disabled=!hasDiff;
+  tr.querySelector('.pick-notes').disabled=!hasDiff;
+  tr.classList.toggle('has-pick-difference',hasDiff);
+  updatePickingTotals();
+}
+
 async function openPicklistDetail(id) {
   const {data,error}=await db.from('picklist_detail_wms_view').select('*').eq('picklist_id',id)
-    .order('expiration_date',{ascending:true}).order('level',{ascending:true}).order('location',{ascending:true});
+    .order('picking_route',{ascending:true}).order('location',{ascending:true});
   if(error) return alert('No se pudo cargar la picklist.\n\n'+error.message);
   currentPicklistDetail=data||[]; currentPicklistId=id;
   const header=picklistRows.find(p=>String(p.picklist_id)===String(id));
   $('#picklistDetailTitle').textContent=`Picklist ${header?.folio || ''}`;
   $('#picklistDetailSub').textContent=header?`${header.delivery_reference} · ${header.customer_name} · ${header.status}`:'';
-  $('#picklistDetailBody').innerHTML=currentPicklistDetail.map((x,i)=>`<tr>
+
+  const editable=header?.status==='EN_SURTIDO' && header?.taken_by_name==='supervisor';
+  const finished=['SURTIDA_COMPLETA','SURTIDA_PARCIAL'].includes(header?.status);
+
+  $('#picklistDetailBody').innerHTML=currentPicklistDetail.map((x,i)=>`<tr data-line-id="${escapeHtml(x.picklist_line_id)}" data-reserved="${Number(x.reserved_pieces||0)}">
     <td>${i+1}</td><td><b>${escapeHtml(x.location)}</b></td><td>${escapeHtml(x.sku)}</td><td>${escapeHtml(x.description)}</td>
-    <td>${escapeHtml(x.lot)}</td><td>${escapeHtml(x.expiration_date)}</td><td>${Number(x.days_remaining)}</td><td><b>${Number(x.reserved_pieces||0).toLocaleString()}</b></td>
-  </tr>`).join('') || '<tr><td colspan="8" class="empty">Sin líneas.</td></tr>';
+    <td>${escapeHtml(x.lot)}</td><td>${escapeHtml(x.expiration_date)}</td><td>${Number(x.days_remaining)}</td>
+    <td><b>${Number(x.reserved_pieces||0).toLocaleString()}</b></td>
+    <td><input class="pick-confirmed" type="number" min="0" max="${Number(x.reserved_pieces||0)}" step="1" value="${finished?Number(x.confirmed_pieces||0):Number(x.reserved_pieces||0)}" ${editable?'':'disabled'}></td>
+    <td><select class="pick-incident" ${editable?'':'disabled'}><option value="">Selecciona</option><option>DIFERENCIA FISICA</option><option>PRODUCTO DAÑADO</option><option>PRODUCTO NO ENCONTRADO</option><option>ERROR DE UBICACION</option><option>PEDIDO YA NO REQUIERE TODO</option><option>OTRO</option></select></td>
+    <td><select class="pick-treatment" ${editable?'':'disabled'}><option value="AVAILABLE">Producto existe: liberar reserva</option><option value="PHYSICAL">Diferencia física: bloquear saldo</option></select></td>
+    <td><input class="pick-notes" placeholder="Opcional" value="${escapeHtml(x.observations||'')}" ${editable?'':'disabled'}></td>
+  </tr>`).join('') || '<tr><td colspan="12" class="empty">Sin líneas.</td></tr>';
+
+  $('#picklistDetailBody').querySelectorAll('tr[data-line-id]').forEach(tr=>{
+    const input=tr.querySelector('.pick-confirmed');
+    input?.addEventListener('input',()=>syncPickingRow(tr));
+    syncPickingRow(tr);
+  });
+
+  $('#takePicklist').classList.toggle('hidden',!['GENERADA','DISPONIBLE','CON_INCIDENCIA'].includes(header?.status));
+  $('#fillCompletePicking').classList.toggle('hidden',!editable);
+  $('#confirmPicking').classList.toggle('hidden',!editable);
+  const lock=$('#pickingLockInfo');
+  if(header?.status==='EN_SURTIDO'){
+    lock.classList.remove('hidden');
+    lock.textContent=`En surtido por ${header.taken_by_name||'usuario'} desde ${header.taken_at?new Date(header.taken_at).toLocaleString():'hora no disponible'}.`;
+  } else if(finished){
+    lock.classList.remove('hidden');
+    lock.textContent=`Surtido cerrado: ${header.status}. Confirmado por ${header.completed_by_name||'usuario'}.`;
+  } else lock.classList.add('hidden');
+
   $('#picklistDetailPanel').classList.remove('hidden');
   $('#picklistDetailPanel').scrollIntoView({behavior:'smooth',block:'start'});
+}
+
+async function takeCurrentPicklist() {
+  if(!currentPicklistId)return;
+  const {data,error}=await db.rpc('take_wms_picklist',{p_picklist_id:currentPicklistId,p_operator_name:'supervisor'});
+  if(error)return alert('No se pudo tomar la picklist.\n\n'+error.message);
+  await refreshOrdersPicklists();
+  await openPicklistDetail(currentPicklistId);
+}
+
+function fillCompletePicking() {
+  document.querySelectorAll('#picklistDetailBody tr[data-line-id]').forEach(tr=>{
+    const input=tr.querySelector('.pick-confirmed');
+    if(input&&!input.disabled){input.value=tr.dataset.reserved;syncPickingRow(tr);}
+  });
+}
+
+async function confirmCurrentPicking() {
+  if(!currentPicklistId)return;
+  const lines=[];
+  let invalid='';
+  document.querySelectorAll('#picklistDetailBody tr[data-line-id]').forEach(tr=>{
+    const reserved=Number(tr.dataset.reserved||0);
+    const confirmed=Math.trunc(Number(tr.querySelector('.pick-confirmed')?.value||0));
+    const diff=reserved-confirmed;
+    const incident=tr.querySelector('.pick-incident')?.value||'';
+    const treatment=tr.querySelector('.pick-treatment')?.value||'AVAILABLE';
+    if((confirmed<0||confirmed>reserved)&&!invalid)invalid='Hay una cantidad surtida inválida.';
+    if(diff>0&&!incident&&!invalid)invalid='Toda diferencia requiere un motivo.';
+    lines.push({
+      picklist_line_id:tr.dataset.lineId,
+      confirmed_pieces:confirmed,
+      incident_type:diff>0?incident:null,
+      physical_difference:diff>0&&treatment==='PHYSICAL',
+      observations:diff>0?(tr.querySelector('.pick-notes')?.value||''):null
+    });
+  });
+  if(invalid)return alert(invalid);
+  const total=lines.reduce((a,x)=>a+x.confirmed_pieces,0);
+  if(!confirm(`Se descontarán ${total.toLocaleString()} piezas del inventario. Esta acción no se puede editar. ¿Confirmar surtido?`))return;
+  const btn=$('#confirmPicking');btn.disabled=true;const old=btn.textContent;btn.textContent='Confirmando…';
+  try{
+    const {data,error}=await db.rpc('confirm_wms_picking',{p_picklist_id:currentPicklistId,p_operator_name:'supervisor',p_lines:lines});
+    if(error)throw error;
+    await refreshOperationalData();
+    alert(`Surtido confirmado.\nFolio: ${data.folio}\nConfirmado: ${Number(data.confirmed_pieces).toLocaleString()} piezas\nDiferencia: ${Number(data.difference_pieces).toLocaleString()} piezas\nEstatus: ${data.status}`);
+    await openPicklistDetail(currentPicklistId);
+  }catch(err){console.error(err);alert('No se pudo confirmar el surtido.\n\n'+err.message);}
+  finally{btn.disabled=false;btn.textContent=old;}
 }
 
 function printCurrentPicklist() {
@@ -1413,4 +1517,7 @@ $('#refreshOrders')?.addEventListener('click',refreshOrdersPicklists);
 $('#refreshPicklists')?.addEventListener('click',refreshOrdersPicklists);
 $('#closePicklistDetail')?.addEventListener('click',()=>$('#picklistDetailPanel')?.classList.add('hidden'));
 $('#printPicklist')?.addEventListener('click',printCurrentPicklist);
+$('#takePicklist')?.addEventListener('click',takeCurrentPicklist);
+$('#fillCompletePicking')?.addEventListener('click',fillCompletePicking);
+$('#confirmPicking')?.addEventListener('click',confirmCurrentPicking);
 
