@@ -1367,10 +1367,12 @@ function renderPicklists() {
   if(!body) return;
   body.innerHTML=picklistRows.map(p=>`<tr>
     <td><b>${escapeHtml(p.folio)}</b></td><td>${escapeHtml(p.delivery_reference)}</td><td>${escapeHtml(p.customer_name)}</td>
-    <td>${Number(p.line_count||0)}</td><td>${Number(p.reserved_pieces||0).toLocaleString()}</td><td>${Number(p.confirmed_pieces||0).toLocaleString()}</td>
+    <td>${Number(p.line_count||0)}</td><td>${Number(p.reserved_pieces||0).toLocaleString()}</td>
+    <td><b>${Number(p.reserved_full_pallets||0)}</b> completas${Number(p.reserved_remainders||0)>0?` + <b>${Number(p.reserved_remainders||0)}</b> resto(s)`:''}<small class="pick-user">${Number(p.reserved_pallet_positions||0)} posiciones</small></td>
+    <td>${Number(p.confirmed_pieces||0).toLocaleString()}</td>
     <td><span class="order-status">${escapeHtml(p.status)}</span>${p.taken_by_name?`<small class="pick-user">Por ${escapeHtml(p.taken_by_name)}</small>`:''}</td>
     <td><button class="mini pick-detail" data-id="${escapeHtml(p.picklist_id)}">${['SURTIDA_COMPLETA','SURTIDA_PARCIAL'].includes(p.status)?'Ver':'Abrir surtido'}</button></td>
-  </tr>`).join('') || '<tr><td colspan="8" class="empty">No hay picklists generadas.</td></tr>';
+  </tr>`).join('') || '<tr><td colspan="9" class="empty">No hay picklists generadas.</td></tr>';
 
 }
 
