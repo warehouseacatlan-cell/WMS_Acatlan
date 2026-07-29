@@ -58,3 +58,21 @@
 #shipmentFormPanel textarea{width:100%;box-sizing:border-box;margin-top:6px;padding:10px;border:1px solid #cfd8e3;border-radius:7px;font:inherit;resize:vertical}
 @media(max-width:900px){.shipment-summary{grid-template-columns:repeat(2,minmax(140px,1fr))}}
 @media(max-width:520px){.shipment-summary{grid-template-columns:1fr}}
+
+/* Conteos cíclicos v1 */
+.cycle-summary{display:grid;grid-template-columns:repeat(4,minmax(150px,1fr));gap:12px;margin-top:14px}
+.cycle-summary article{border:1px solid #dfe6ee;background:#f8fafc;border-radius:10px;padding:14px;display:flex;flex-direction:column;gap:4px}
+.cycle-summary b{font-size:24px}.cycle-summary span{font-size:12px;color:#5d6875}
+.cycle-counted{width:105px;padding:7px}.cycle-line-notes{min-width:150px;padding:7px}
+.cycle-diff{font-weight:700;color:#a33;background:#fff1f1}.hidden{display:none!important}
+@media(max-width:900px){.cycle-summary{grid-template-columns:repeat(2,minmax(140px,1fr))}}
+@media(max-width:520px){.cycle-summary{grid-template-columns:1fr}}
+
+/* Programa Maestro de Conteos V2 */
+.master-count-summary{display:grid;grid-template-columns:repeat(5,minmax(130px,1fr));gap:12px;margin-top:14px}
+.master-count-summary article{border:1px solid #dfe6ee;background:#f8fafc;border-radius:10px;padding:14px;display:flex;flex-direction:column;gap:4px}
+.master-count-summary b{font-size:23px}.master-count-summary span{font-size:12px;color:#5d6875}
+.classification-badge{display:inline-flex;min-width:34px;justify-content:center;padding:4px 8px;border-radius:999px;font-weight:800;background:#e8eef6}
+.master-overdue-row td{background:#fff4f4}
+@media(max-width:1050px){.master-count-summary{grid-template-columns:repeat(3,minmax(130px,1fr))}}
+@media(max-width:650px){.master-count-summary{grid-template-columns:repeat(2,minmax(130px,1fr))}}

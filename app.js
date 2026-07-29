@@ -22,6 +22,11 @@ let currentPicklistDetail = [];
 let currentPicklistId = null;
 let shipmentRows = [];
 let currentShipmentPicklistId = null;
+let cycleCountRows = [];
+let currentCycleCountId = null;
+let currentCycleCountDetail = [];
+let countPlanV2Rows = [];
+let countPlanV2Summary = null;
 
 const $ = s => document.querySelector(s);
 const $$ = s => [...document.querySelectorAll(s)];
@@ -104,6 +109,7 @@ async function refreshOperationalData() {
     renderExpiry(expiryRows || []);
     await refreshOrdersPicklists();
     await refreshShipments();
+    await refreshCycleCounts();
     await refreshDashboardSnapshot();
   } catch (err) {
     console.warn('Datos operativos todavía no disponibles:', err.message);
@@ -1338,6 +1344,7 @@ async function importOrdersExcel() {
     }
     await refreshOrdersPicklists();
     await refreshShipments();
+    await refreshCycleCounts();
     await refreshDashboardSnapshot();
     alert(`Importación terminada.\nPedidos importados: ${ok}${failed.length?`\nCon error: ${failed.length}\n\n${failed.slice(0,8).join('\n')}`:''}`);
   } finally {
@@ -1712,6 +1719,354 @@ $('#closeShipmentForm')?.addEventListener('click',()=>{
 });
 $('#confirmShipment')?.addEventListener('click',confirmCurrentShipment);
 
+
+
+async function refreshCycleCounts() {
+  const openBody=$('#cycleCountsOpenBody');
+  const historyBody=$('#cycleCountsHistoryBody');
+  if(!openBody || !historyBody) return;
+  try {
+    const {data,error}=await db.from('cycle_counts_wms_view').select('*')
+      .order('generated_at',{ascending:false});
+    if(error) throw error;
+    cycleCountRows=data||[];
+    await syncAndLoadCountPlanV2();
+    renderCycleCounts();
+    renderCycleLocationOptions();
+  } catch(err) {
+    console.warn('Conteos cíclicos aún no disponibles:',err.message);
+    openBody.innerHTML=`<tr><td colspan="8" class="empty">Ejecuta el parche SQL de Conteos cíclicos. ${escapeHtml(err.message)}</td></tr>`;
+  }
+}
+
+function renderCycleLocationOptions() {
+  const select=$('#cycleLocation');
+  if(!select) return;
+  const openLocationIds=new Set(
+    cycleCountRows.filter(x=>['GENERADO','EN_CONTEO','CAPTURADO'].includes(x.status))
+      .map(x=>String(x.location_id))
+  );
+  const occupiedIds=new Set(
+    inventoryRows.filter(x=>Number(x.physical_pieces)>0).map(x=>String(x.location_id))
+  );
+  const options=locations
+    .filter(l=>occupiedIds.has(String(l.id))&&!openLocationIds.has(String(l.id)))
+    .sort((a,b)=>String(a.ubicacion).localeCompare(String(b.ubicacion),undefined,{numeric:true}))
+    .map(l=>`<option value="${escapeHtml(l.id)}">${escapeHtml(l.ubicacion)} · ${escapeHtml(l.location_type||'')}</option>`)
+    .join('');
+  select.innerHTML='<option value="">Selecciona ubicación</option>'+options;
+}
+
+function renderCycleCounts() {
+  const open=cycleCountRows.filter(x=>['GENERADO','EN_CONTEO','CAPTURADO'].includes(x.status));
+  const history=cycleCountRows.filter(x=>['AUTORIZADO','RECHAZADO','CANCELADO'].includes(x.status));
+
+  $('#cycleCountsOpenBody').innerHTML=open.map(x=>`<tr>
+    <td><b>${escapeHtml(x.folio)}</b></td>
+    <td><b>${escapeHtml(x.location)}</b><small class="pick-user">${escapeHtml(x.location_type||'')}</small></td>
+    <td>${escapeHtml(x.assigned_to_name||'—')}</td>
+    <td>${x.generated_at?new Date(x.generated_at).toLocaleString():'—'}<small class="pick-user">${escapeHtml(x.generated_by_name||'')}</small></td>
+    <td>${Number(x.line_count||0)}</td>
+    <td><span class="order-status">${escapeHtml(x.status)}</span></td>
+    <td>${x.status==='CAPTURADO'?Number(x.difference_pieces||0).toLocaleString():'Oculta'}</td>
+    <td><button class="mini open-cycle-count" data-id="${escapeHtml(x.cycle_count_id)}">${x.status==='CAPTURADO'?'Revisar':'Abrir'}</button></td>
+  </tr>`).join('')||'<tr><td colspan="8" class="empty">Sin conteos abiertos.</td></tr>';
+
+  $('#cycleCountsHistoryBody').innerHTML=history.map(x=>`<tr>
+    <td><b>${escapeHtml(x.folio)}</b></td><td>${escapeHtml(x.location)}</td>
+    <td>${new Date(x.authorized_at||x.rejected_at||x.generated_at).toLocaleString()}</td>
+    <td><span class="order-status">${escapeHtml(x.status)}</span></td>
+    <td>${Number(x.system_pieces||0).toLocaleString()}</td>
+    <td>${Number(x.counted_pieces||0).toLocaleString()}</td>
+    <td class="${Number(x.difference_pieces||0)===0?'':'cycle-diff'}">${Number(x.difference_pieces||0).toLocaleString()}</td>
+    <td>${escapeHtml(x.authorized_by_name||x.rejected_by_name||'—')}</td>
+    <td><button class="mini open-cycle-count" data-id="${escapeHtml(x.cycle_count_id)}">Ver</button></td>
+  </tr>`).join('')||'<tr><td colspan="9" class="empty">Sin historial.</td></tr>';
+
+  const today=localDateISO();
+  const openCount=open.length;
+  const captured=open.filter(x=>x.status==='CAPTURADO').length;
+  const authorizedToday=history.filter(x=>x.status==='AUTORIZADO'&&String(x.authorized_at||'').slice(0,10)===today).length;
+  const net=history.filter(x=>x.status==='AUTORIZADO').reduce((a,x)=>a+Number(x.difference_pieces||0),0);
+  $('#cycleOpenCount').textContent=openCount.toLocaleString();
+  $('#cycleCapturedCount').textContent=captured.toLocaleString();
+  $('#cycleAuthorizedToday').textContent=authorizedToday.toLocaleString();
+  $('#cycleNetDifference').textContent=net.toLocaleString();
+}
+
+async function generateCycleCount() {
+  const locationId=$('#cycleLocation').value;
+  if(!locationId) return alert('Selecciona una ubicación.');
+  const btn=$('#generateCycleCount');
+  const old=btn.textContent;btn.disabled=true;btn.textContent='Generando…';
+  try {
+    const {data,error}=await db.rpc('generate_wms_cycle_count',{
+      p_location_id:locationId,
+      p_assigned_to_name:$('#cycleAssignedTo').value.trim()||'almacen',
+      p_generated_by_name:$('#cycleGeneratedBy').value.trim()||'supervisor',
+      p_notes:$('#cycleGenerateNotes').value.trim()||null
+    });
+    if(error) throw error;
+    await refreshCycleCounts();
+    alert(`Conteo generado.\nFolio: ${data.folio}\nUbicación: ${data.location}\nLíneas: ${data.line_count}`);
+    await openCycleCountDetail(data.cycle_count_id);
+  } catch(err) {
+    alert('No se pudo generar el conteo.\n\n'+err.message);
+  } finally {btn.disabled=false;btn.textContent=old;}
+}
+
+function updateCycleCountTotals(revealSystem) {
+  let system=0,counted=0;
+  document.querySelectorAll('#cycleCountDetailBody tr[data-line-id]').forEach(tr=>{
+    system+=Number(tr.dataset.system||0);
+    counted+=Number(tr.querySelector('.cycle-counted')?.value||tr.dataset.counted||0);
+  });
+  $('#cycleSystemTotal').textContent=revealSystem?system.toLocaleString():'—';
+  $('#cycleCountedTotal').textContent=counted.toLocaleString();
+  $('#cycleDifferenceTotal').textContent=revealSystem?(counted-system).toLocaleString():'—';
+}
+
+async function openCycleCountDetail(id) {
+  const header=cycleCountRows.find(x=>String(x.cycle_count_id)===String(id));
+  const {data,error}=await db.from('cycle_count_detail_wms_view').select('*')
+    .eq('cycle_count_id',id).order('expiration_date',{ascending:true});
+  if(error) return alert('No se pudo abrir el conteo.\n\n'+error.message);
+  currentCycleCountId=id;
+  currentCycleCountDetail=data||[];
+  const status=header?.status||data?.[0]?.status;
+  const editable=status==='EN_CONTEO';
+  const revealSystem=['CAPTURADO','AUTORIZADO','RECHAZADO','CANCELADO'].includes(status);
+
+  $('#cycleCountDetailTitle').textContent=`Conteo ${header?.folio||data?.[0]?.folio||''}`;
+  $('#cycleCountDetailSub').textContent=`Ubicación ${header?.location||data?.[0]?.location||''} · ${status} · Asignado a ${header?.assigned_to_name||data?.[0]?.assigned_to_name||'—'}`;
+  $('#cycleBlindNote').classList.toggle('hidden',revealSystem);
+
+  document.querySelectorAll('.cycle-system-column,.cycle-difference-column')
+    .forEach(el=>el.classList.toggle('hidden',!revealSystem));
+
+  $('#cycleCountDetailBody').innerHTML=currentCycleCountDetail.map(x=>`<tr data-line-id="${escapeHtml(x.cycle_count_line_id)}" data-system="${Number(x.system_physical_pieces||0)}" data-counted="${Number(x.counted_pieces||0)}">
+    <td><b>${escapeHtml(x.sku)}</b></td><td>${escapeHtml(x.description)}</td><td>${escapeHtml(x.lot)}</td>
+    <td>${escapeHtml(x.expiration_date||'—')}</td><td>${Number(x.pieces_per_pallet||0).toLocaleString()}</td>
+    <td class="cycle-system-column ${revealSystem?'':'hidden'}">${revealSystem?Number(x.system_physical_pieces||0).toLocaleString():'—'}</td>
+    <td><input class="cycle-counted" type="number" min="0" step="1" value="${x.counted_pieces??''}" placeholder="Captura" ${editable?'':'disabled'}></td>
+    <td class="cycle-difference-column ${revealSystem?'':'hidden'} ${Number(x.difference_pieces||0)===0?'':'cycle-diff'}">${revealSystem?Number(x.difference_pieces||0).toLocaleString():'—'}</td>
+    <td><input class="cycle-line-notes" value="${escapeHtml(x.observations||'')}" placeholder="Opcional" ${editable?'':'disabled'}></td>
+  </tr>`).join('');
+
+  $('#cycleCountDetailBody').querySelectorAll('.cycle-counted').forEach(input=>{
+    input.addEventListener('input',()=>updateCycleCountTotals(revealSystem));
+  });
+
+  $('#takeCycleCount').classList.toggle('hidden',status!=='GENERADO');
+  $('#submitCycleCount').classList.toggle('hidden',status!=='EN_CONTEO');
+  $('#authorizeCycleCount').classList.toggle('hidden',status!=='CAPTURADO');
+  $('#rejectCycleCount').classList.toggle('hidden',!['GENERADO','EN_CONTEO','CAPTURADO'].includes(status));
+  updateCycleCountTotals(revealSystem);
+  $('#cycleCountDetailPanel').classList.remove('hidden');
+  $('#cycleCountDetailPanel').scrollIntoView({behavior:'smooth',block:'start'});
+}
+
+async function takeCycleCount() {
+  if(!currentCycleCountId) return;
+  const {error}=await db.rpc('take_wms_cycle_count',{
+    p_cycle_count_id:currentCycleCountId,
+    p_operator_name:'almacen'
+  });
+  if(error) return alert('No se pudo tomar el conteo.\n\n'+error.message);
+  await refreshCycleCounts();
+  await openCycleCountDetail(currentCycleCountId);
+}
+
+async function submitCycleCount() {
+  if(!currentCycleCountId) return;
+  const lines=[];
+  let invalid='';
+  document.querySelectorAll('#cycleCountDetailBody tr[data-line-id]').forEach(tr=>{
+    const raw=tr.querySelector('.cycle-counted').value;
+    if(raw===''&&!invalid) invalid='Captura todas las cantidades físicas.';
+    const counted=Math.trunc(Number(raw));
+    if(counted<0&&!invalid) invalid='No se permiten cantidades negativas.';
+    lines.push({
+      cycle_count_line_id:tr.dataset.lineId,
+      counted_pieces:counted,
+      observations:tr.querySelector('.cycle-line-notes').value.trim()||null
+    });
+  });
+  if(invalid) return alert(invalid);
+  if(!confirm('¿Finalizar la captura? Después se mostrará la comparación contra el sistema.')) return;
+  const {data,error}=await db.rpc('submit_wms_cycle_count',{
+    p_cycle_count_id:currentCycleCountId,
+    p_operator_name:'almacen',
+    p_lines:lines
+  });
+  if(error) return alert('No se pudo finalizar el conteo.\n\n'+error.message);
+  await refreshCycleCounts();
+  await openCycleCountDetail(currentCycleCountId);
+  alert(`Captura terminada.\nSistema: ${Number(data.system_pieces).toLocaleString()}\nContado: ${Number(data.counted_pieces).toLocaleString()}\nDiferencia: ${Number(data.difference_pieces).toLocaleString()}`);
+}
+
+async function authorizeCycleCount() {
+  if(!currentCycleCountId) return;
+  const header=cycleCountRows.find(x=>String(x.cycle_count_id)===String(currentCycleCountId));
+  const diff=Number(header?.difference_pieces||0);
+  const warning=diff===0
+    ? 'El conteo coincide. ¿Autorizar y cerrar?'
+    : `Se aplicará un ajuste neto de ${diff.toLocaleString()} piezas.\n\nLos sobrantes quedarán BLOQUEADOS; los faltantes reducirán inventario no reservado.\n¿Autorizar?`;
+  if(!confirm(warning)) return;
+  const {data,error}=await db.rpc('authorize_wms_cycle_count',{
+    p_cycle_count_id:currentCycleCountId,
+    p_supervisor_name:'supervisor',
+    p_notes:null
+  });
+  if(error) return alert('No se pudo autorizar.\n\n'+error.message);
+  await refreshOperationalData();
+  await openCycleCountDetail(currentCycleCountId);
+  alert(`Conteo autorizado.\nFolio: ${data.folio}\nAjuste neto: ${Number(data.net_difference_pieces).toLocaleString()} piezas`);
+}
+
+async function rejectCycleCount() {
+  if(!currentCycleCountId) return;
+  const reason=prompt('Motivo del rechazo:','Realizar un nuevo conteo');
+  if(reason===null) return;
+  const {error}=await db.rpc('reject_wms_cycle_count',{
+    p_cycle_count_id:currentCycleCountId,
+    p_supervisor_name:'supervisor',
+    p_reason:reason||'Realizar un nuevo conteo'
+  });
+  if(error) return alert('No se pudo rechazar.\n\n'+error.message);
+  $('#cycleCountDetailPanel').classList.add('hidden');
+  currentCycleCountId=null;
+  await refreshCycleCounts();
+}
+
+document.addEventListener('click',event=>{
+  const button=event.target.closest('.open-cycle-count');
+  if(button) openCycleCountDetail(button.dataset.id);
+});
+
+
+function authorizedCycleCountIdsV2() {
+  return cycleCountRows
+    .filter(x=>{
+      const status=String(x.status||'').toUpperCase();
+      return Boolean(x.authorized_at)||status.includes('AUTORIZ');
+    })
+    .map(x=>x.cycle_count_id)
+    .filter(Boolean);
+}
+
+async function syncAndLoadCountPlanV2() {
+  const monthStart=localDateISO().slice(0,7)+'-01';
+  try {
+    const authorized=authorizedCycleCountIdsV2();
+    await db.rpc('sync_wms_count_plan_v2',{
+      p_authorized_cycle_count_ids:authorized
+    });
+
+    const [{data:plan,error:planError},{data:summary,error:summaryError}]=await Promise.all([
+      db.from('wms_count_plan_v2_view').select('*')
+        .eq('period_month',monthStart)
+        .order('target_date',{ascending:true})
+        .order('sku',{ascending:true}),
+      db.from('wms_count_summary_v2_view').select('*').maybeSingle()
+    ]);
+
+    if(planError) throw planError;
+    if(summaryError) throw summaryError;
+
+    countPlanV2Rows=plan||[];
+    countPlanV2Summary=summary||null;
+    renderCountPlanV2();
+  } catch(err) {
+    console.warn('Programa Maestro V2 no disponible:',err.message);
+    const body=$('#countV2PlanBody');
+    if(body) body.innerHTML=`<tr><td colspan="7" class="empty">Ejecuta el SQL del Programa Maestro V2. ${escapeHtml(err.message)}</td></tr>`;
+  }
+}
+
+function renderCountPlanV2() {
+  const summary=countPlanV2Summary||{};
+  $('#countV2Compliance').textContent=`${Number(summary.compliance_percent||0).toLocaleString()}%`;
+  $('#countV2Completed').textContent=Number(summary.completed_rounds||0).toLocaleString();
+  $('#countV2DueToday').textContent=Number(summary.due_today||0).toLocaleString();
+  $('#countV2Overdue').textContent=Number(summary.overdue_rounds||0).toLocaleString();
+  $('#countV2Created').textContent=Number(summary.created_rounds||0).toLocaleString();
+
+  const body=$('#countV2PlanBody');
+  if(!body) return;
+
+  const filter=$('#countV2Filter')?.value||'ALL';
+  const search=($('#countV2Search')?.value||'').trim().toLowerCase();
+  const today=localDateISO();
+
+  const rows=countPlanV2Rows.filter(x=>{
+    const overdue=x.status!=='COMPLETADO'&&String(x.target_date)<today;
+    const filterOk=filter==='ALL'||x.status===filter||(filter==='ATRASADO'&&overdue);
+    const text=`${x.sku||''} ${x.product_name||''} ${x.classification||''}`.toLowerCase();
+    return filterOk&&(!search||text.includes(search));
+  });
+
+  body.innerHTML=rows.map(x=>{
+    const overdue=x.status!=='COMPLETADO'&&String(x.target_date)<today;
+    const created=Number(x.locations_created||0);
+    const authorized=Number(x.locations_authorized||0);
+    const current=Number(x.current_locations||0);
+    return `<tr class="${overdue?'master-overdue-row':''}">
+      <td>${escapeHtml(x.target_date||'—')}${overdue?'<small class="pick-user">ATRASADO</small>':''}</td>
+      <td><b>${escapeHtml(x.sku)}</b></td>
+      <td>${escapeHtml(x.product_name||'')}</td>
+      <td><span class="classification-badge">${escapeHtml(x.classification||'')}</span></td>
+      <td>${Number(x.round_no||0)} de ${Number(x.monthly_rounds||0)}</td>
+      <td>${authorized}/${created||current}<small class="pick-user">autorizadas / requeridas</small></td>
+      <td><span class="order-status">${escapeHtml(x.status)}</span></td>
+    </tr>`;
+  }).join('')||'<tr><td colspan="7" class="empty">Sin registros con este filtro.</td></tr>';
+}
+
+async function runCountPlanV2() {
+  const btn=$('#runCountPlanV2');
+  const old=btn.textContent;
+  btn.disabled=true;
+  btn.textContent='Generando…';
+  try {
+    const limit=Math.max(1,Math.trunc(Number($('#countV2Limit').value||30)));
+    const {data,error}=await db.rpc('generate_wms_count_plan_today_v2',{
+      p_date:localDateISO(),
+      p_assigned_to:'almacen',
+      p_generated_by:'programa maestro',
+      p_location_limit:limit
+    });
+    if(error) throw error;
+
+    await refreshCycleCounts();
+    alert(
+      `Proceso terminado.\n`+
+      `Conteos generados: ${Number(data.counts_generated||0)}\n`+
+      `Relaciones creadas: ${Number(data.links_created||0)}\n`+
+      `Ubicaciones omitidas: ${Number(data.locations_skipped||0)}`
+    );
+  } catch(err) {
+    alert('No se pudieron generar los conteos.\n\n'+err.message);
+  } finally {
+    btn.disabled=false;
+    btn.textContent=old;
+  }
+}
+
+$('#runCountPlanV2')?.addEventListener('click',runCountPlanV2);
+$('#countV2Filter')?.addEventListener('change',renderCountPlanV2);
+$('#countV2Search')?.addEventListener('input',renderCountPlanV2);
+
+$('#refreshCycleCounts')?.addEventListener('click',refreshCycleCounts);
+$('#generateCycleCount')?.addEventListener('click',generateCycleCount);
+$('#takeCycleCount')?.addEventListener('click',takeCycleCount);
+$('#submitCycleCount')?.addEventListener('click',submitCycleCount);
+$('#authorizeCycleCount')?.addEventListener('click',authorizeCycleCount);
+$('#rejectCycleCount')?.addEventListener('click',rejectCycleCount);
+$('#closeCycleCountDetail')?.addEventListener('click',()=>{
+  $('#cycleCountDetailPanel')?.classList.add('hidden');
+  currentCycleCountId=null;
+});
 
 $('#previewOrdersExcel')?.addEventListener('click',previewOrdersExcel);
 $('#importOrdersExcel')?.addEventListener('click',importOrdersExcel);

@@ -1,7 +1,7 @@
 <!doctype html><html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>WMS Acatlán</title><link rel="stylesheet" href="styles.css"></head><body>
 <div id="login" class="login"><div class="login-card"><h1>WMS Acatlán</h1><p>Control de almacén</p><label>Usuario<input id="user" value="supervisor"></label><label>Contraseña<input id="pass" type="password" value="demo"></label><button id="loginBtn">Ingresar</button><small>Demo: supervisor / demo</small></div></div>
 <div id="app" class="app hidden"><aside><h2>WMS Acatlán</h2><div class="role">Supervisor</div><nav>
-<button data-view="dashboard" class="active">Dashboard</button><button data-view="recepcion">Nueva recepción</button><button data-view="productos">Productos</button><button data-view="ubicaciones">Ubicaciones</button><button data-view="pedidos">Pedidos</button><button data-view="picklists">Picklists</button><button data-view="embarques">Embarques</button><button data-view="calidad">Calidad</button><button data-view="inventario">Inventario</button><button data-view="transferencias">Transferencias</button></nav></aside>
+<button data-view="dashboard" class="active">Dashboard</button><button data-view="recepcion">Nueva recepción</button><button data-view="productos">Productos</button><button data-view="ubicaciones">Ubicaciones</button><button data-view="pedidos">Pedidos</button><button data-view="picklists">Picklists</button><button data-view="embarques">Embarques</button><button data-view="calidad">Calidad</button><button data-view="inventario">Inventario</button><button data-view="conteos">Conteos cíclicos</button><button data-view="transferencias">Transferencias</button></nav></aside>
 <main><header><div><h1 id="title">Dashboard</h1><p id="subtitle">Almacén Acatlán</p><small id="dbStatus" class="db-status" data-state="loading">Sin conectar</small></div><button id="logout">Salir</button></header>
 <section id="dashboard" class="view">
 <div class="dashboard-head"><div><h2>Resumen operativo</h2><p class="muted">Inventario, capacidad y alertas calculadas desde Supabase.</p></div><button id="refreshDashboard">Actualizar dashboard</button></div>
@@ -110,6 +110,99 @@
 
 <section id="calidad" class="view hidden"><div class="panel"><div class="section-head"><div><h3>Calidad</h3><p class="muted">Gestiona inventario pendiente, liberado y bloqueado por producto, lote y ubicación.</p></div><span id="qualityCount" class="count-badge">0 registros</span></div><div class="quality-tabs"><button type="button" class="quality-tab active" data-quality-tab="PENDING">Pendiente</button><button type="button" class="quality-tab" data-quality-tab="RELEASED">Liberado</button><button type="button" class="quality-tab" data-quality-tab="BLOCKED">Bloqueado</button></div><div class="toolbar"><input id="qualityFilter" placeholder="Buscar SKU, producto, lote o ubicación"><button id="refreshQuality">Actualizar</button></div><div id="qualityTabHelp" class="quality-tab-help">Libera o bloquea cantidades específicas que todavía están pendientes de Calidad.</div><div class="table-wrap"><table><thead><tr><th>SKU</th><th>Producto</th><th>Lote</th><th>Ubicación</th><th id="qualityQtyHeader">Pendiente</th><th>Físico</th><th>Reservado</th><th>Caducidad</th><th>Días</th><th>Semáforo</th><th>Acción</th></tr></thead><tbody id="qualityBody"></tbody></table></div></div></section>
 <section id="inventario" class="view hidden"><div class="panel"><div class="section-head"><div><h3>Inventario</h3><p class="muted">Control por producto + lote + ubicación. La pieza es la unidad matemática principal.</p></div><span id="inventoryCount" class="count-badge">0 registros</span></div><div class="toolbar inventory-toolbar"><input id="inventoryFilter" placeholder="Buscar SKU, producto, lote o ubicación"><select id="inventoryStatusFilter"><option value="ALL">Todos los estados</option><option value="PENDING">Pendiente Calidad</option><option value="AVAILABLE">Disponible</option><option value="BLOCKED">Bloqueado</option><option value="RESERVED">Reservado</option></select><button id="refreshInventory">Actualizar</button></div><div class="inventory-summary"><div><span>Físico</span><b id="invPhysical">0</b></div><div><span>Pendiente</span><b id="invPending">0</b></div><div><span>Liberado</span><b id="invReleased">0</b></div><div><span>Bloqueado</span><b id="invBlocked">0</b></div><div><span>Reservado</span><b id="invReserved">0</b></div><div><span>Disponible</span><b id="invAvailable">0</b></div></div><div class="table-wrap"><table><thead><tr><th>SKU</th><th>Producto</th><th>Lote</th><th>Ubicación</th><th>Físico</th><th>Tarimas + resto</th><th>Pendiente</th><th>Liberado</th><th>Bloqueado</th><th>Reservado</th><th>Disponible</th><th>Caducidad</th><th>Días restantes</th><th>Semáforo</th><th>Elegibilidad</th></tr></thead><tbody id="inventoryBody"></tbody></table></div></div></section>
+
+<section id="conteos" class="view hidden">
+  <div class="panel">
+    <div class="section-head">
+      <div><h3>Programa Maestro de Conteos V2</h3><p class="muted">Plan ABC/XYZ independiente del estado interno de los conteos.</p></div>
+      <div class="detail-actions">
+        <button id="runCountPlanV2" class="primary">Generar conteos de hoy</button>
+        <button id="refreshCycleCounts">Actualizar</button>
+      </div>
+    </div>
+    <div class="master-count-summary">
+      <article><b id="countV2Compliance">0%</b><span>Cumplimiento mensual</span></article>
+      <article><b id="countV2Completed">0</b><span>Vueltas completadas</span></article>
+      <article><b id="countV2DueToday">0</b><span>Programadas hoy</span></article>
+      <article><b id="countV2Overdue">0</b><span>Atrasadas</span></article>
+      <article><b id="countV2Created">0</b><span>En proceso</span></article>
+    </div>
+    <div class="cycle-summary">
+      <article><b id="cycleOpenCount">0</b><span>Abiertos</span></article>
+      <article><b id="cycleCapturedCount">0</b><span>Por autorizar</span></article>
+      <article><b id="cycleAuthorizedToday">0</b><span>Autorizados hoy</span></article>
+      <article><b id="cycleNetDifference">0</b><span>Diferencia neta histórica</span></article>
+    </div>
+  </div>
+
+  <div class="panel">
+    <div class="section-head"><div><h3>Calendario mensual</h3><p class="muted">A/B: cuatro vueltas. C: dos vueltas. El sistema agrupa por ubicación al generar.</p></div></div>
+    <div class="grid">
+      <label>Filtro
+        <select id="countV2Filter">
+          <option value="ALL">Todo</option>
+          <option value="PENDIENTE">Pendiente</option>
+          <option value="CREADO">En proceso</option>
+          <option value="COMPLETADO">Completado</option>
+          <option value="ATRASADO">Atrasado</option>
+        </select>
+      </label>
+      <label>Buscar<input id="countV2Search" placeholder="SKU o producto"></label>
+      <label>Límite por ejecución<input id="countV2Limit" type="number" min="1" max="200" value="30"></label>
+    </div>
+    <div class="table-wrap"><table>
+      <thead><tr><th>Fecha</th><th>SKU</th><th>Producto</th><th>Clase</th><th>Vuelta</th><th>Avance ubicaciones</th><th>Estatus</th></tr></thead>
+      <tbody id="countV2PlanBody"><tr><td colspan="7" class="empty">Cargando calendario…</td></tr></tbody>
+    </table></div>
+  </div>
+
+  <div class="panel">
+    <div class="section-head"><div><h3>Generar conteo</h3><p class="muted">Solo aparecen ubicaciones ocupadas que no tienen otro conteo abierto.</p></div></div>
+    <div class="grid">
+      <label>Ubicación<select id="cycleLocation"><option value="">Selecciona ubicación</option></select></label>
+      <label>Asignado a<input id="cycleAssignedTo" value="almacen"></label>
+      <label>Generado por<input id="cycleGeneratedBy" value="supervisor"></label>
+      <label>Observaciones<input id="cycleGenerateNotes" placeholder="Opcional"></label>
+    </div>
+    <div class="actions"><button id="generateCycleCount" class="primary">Generar conteo</button></div>
+  </div>
+
+  <div class="panel">
+    <div class="section-head"><div><h3>Conteos abiertos</h3><p class="muted">Generados, en captura o pendientes de autorización.</p></div></div>
+    <div class="table-wrap"><table>
+      <thead><tr><th>Folio</th><th>Ubicación</th><th>Asignado</th><th>Generado</th><th>Líneas</th><th>Estatus</th><th>Diferencia</th><th>Acción</th></tr></thead>
+      <tbody id="cycleCountsOpenBody"><tr><td colspan="8" class="empty">Sin conteos abiertos.</td></tr></tbody>
+    </table></div>
+  </div>
+
+  <div id="cycleCountDetailPanel" class="panel hidden">
+    <div class="section-head">
+      <div><h3 id="cycleCountDetailTitle">Detalle del conteo</h3><p id="cycleCountDetailSub" class="muted"></p></div>
+      <div class="detail-actions">
+        <button id="takeCycleCount" class="primary">Tomar conteo</button>
+        <button id="submitCycleCount" class="primary">Finalizar captura</button>
+        <button id="authorizeCycleCount" class="primary">Autorizar ajuste</button>
+        <button id="rejectCycleCount">Rechazar</button>
+        <button id="closeCycleCountDetail">Cerrar</button>
+      </div>
+    </div>
+    <div id="cycleBlindNote" class="shipment-warning"><b>Conteo ciego:</b> la cantidad del sistema se mostrará únicamente después de finalizar la captura.</div>
+    <div class="table-wrap"><table>
+      <thead><tr><th>SKU</th><th>Producto</th><th>Lote</th><th>Caducidad</th><th>Piezas/tarima</th><th class="cycle-system-column">Sistema</th><th>Conteo físico</th><th class="cycle-difference-column">Diferencia</th><th>Observaciones</th></tr></thead>
+      <tbody id="cycleCountDetailBody"></tbody>
+    </table></div>
+    <div class="picking-totals"><span>Sistema: <b id="cycleSystemTotal">—</b></span><span>Contado: <b id="cycleCountedTotal">0</b></span><span>Diferencia: <b id="cycleDifferenceTotal">—</b></span></div>
+  </div>
+
+  <div class="panel">
+    <div class="section-head"><div><h3>Historial</h3><p class="muted">Conteos autorizados, rechazados o cancelados.</p></div></div>
+    <div class="table-wrap"><table>
+      <thead><tr><th>Folio</th><th>Ubicación</th><th>Fecha</th><th>Estatus</th><th>Sistema</th><th>Contado</th><th>Diferencia</th><th>Responsable</th><th>Acción</th></tr></thead>
+      <tbody id="cycleCountsHistoryBody"><tr><td colspan="9" class="empty">Sin historial.</td></tr></tbody>
+    </table></div>
+  </div>
+</section>
+
 <section id="transferencias" class="view hidden"><div class="panel"><div class="section-head"><div><h3>Transferencias internas</h3><p class="muted">Mueve inventario entre ubicaciones conservando producto, lote, caducidad y estatus.</p></div><span id="transferCount" class="count-badge">0 opciones</span></div><div class="toolbar inventory-toolbar"><input id="transferFilter" placeholder="Buscar SKU, producto, lote o ubicación"><select id="transferBucketFilter"><option value="RELEASED">Liberado disponible</option><option value="PENDING">Pendiente Calidad</option><option value="BLOCKED">Bloqueado</option></select><button id="refreshTransfers">Actualizar</button></div><div class="transfer-help"><b>Reglas:</b> no se mueve inventario reservado; RACK/PISO se respeta; tarimas completas priorizan niveles altos y restos priorizan niveles bajos.</div><div class="table-wrap"><table><thead><tr><th>SKU</th><th>Producto</th><th>Lote</th><th>Origen</th><th>Tipo</th><th>Físico</th><th>Transferible</th><th>Tarimas + resto</th><th>Acción</th></tr></thead><tbody id="transferBody"></tbody></table></div></div></section>
 <div id="transferModal" class="modal hidden"><div class="modal-card transfer-modal-card"><div class="modal-head"><h3>Nueva transferencia</h3><button id="closeTransferModal" class="icon-btn" type="button">×</button></div><div id="transferItemInfo" class="quality-item-info"></div><div class="grid quality-grid"><label>Estatus a mover<input id="transferBucketLabel" disabled></label><label>Máximo transferible<input id="transferMax" disabled></label><label>Cantidad (piezas)<input id="transferQty" type="number" min="1"></label><label>Destino<div class="destination-row"><select id="transferDestination"><option value="">Selecciona destino</option></select><button id="suggestTransferDestination" type="button">Sugerir</button></div></label></div><div id="transferDestinationInfo" class="calc">Selecciona cantidad y destino.</div><div class="grid quality-grid"><label>Motivo<select id="transferReason"><option>REACOMODO</option><option>OPTIMIZACION ESPACIO</option><option>RESTO A NIVEL BAJO</option><option>CONSOLIDACION</option><option>OTRO</option></select></label><label>Usuario<input value="supervisor" disabled></label></div><label class="block-label">Observaciones<textarea id="transferNotes" rows="3" placeholder="Opcional"></textarea></label><div class="actions"><button id="cancelTransfer">Cancelar</button><button id="confirmTransfer" class="primary">Confirmar transferencia</button></div></div></div><div id="qualityModal" class="modal hidden"><div class="modal-card"><div class="modal-head"><h3 id="qualityModalTitle">Procesar Calidad</h3><button id="closeQualityModal" class="icon-btn" type="button">×</button></div><div id="qualityItemInfo" class="quality-item-info"></div><div id="qualityWarning" class="warning-box hidden"></div><div id="qualityPendingFields" class="grid quality-grid"><label>Liberar (piezas)<input id="qualityRelease" type="number" min="0" value="0"></label><label>Bloquear (piezas)<input id="qualityBlock" type="number" min="0" value="0"></label></div><div id="qualityReclassFields" class="grid quality-grid hidden"><label id="qualityReclassLabel">Cantidad (piezas)<input id="qualityReclassQty" type="number" min="0" value="0"></label><div class="quality-limit"><span id="qualityReclassLimitLabel">Máximo</span><b id="qualityReclassLimit">0</b></div></div><div class="grid quality-grid"><label>Motivo<select id="qualityReason"><option value="LIBERACION CALIDAD">Liberación Calidad</option><option value="RETENCION CALIDAD">Retención / Bloqueo Calidad</option><option value="CADUCIDAD">Caducidad / Vida insuficiente</option><option value="MUESTREO CALIDAD">Muestreo / Análisis</option><option value="RELIBERACION CALIDAD">Re-liberación por Calidad</option><option value="OTRO">Otro</option></select></label><label>Usuario<input value="supervisor" disabled></label></div><label class="block-label">Observaciones<textarea id="qualityNotes" rows="3" placeholder="Opcional"></textarea></label><div class="modal-totals"><span id="qualityBaseTotalLabel">Pendiente actual: <b id="qualityPendingTotal">0</b></span><span>Procesar: <b id="qualityProcessTotal">0</b></span><span id="qualityRemainLabel">Quedará pendiente: <b id="qualityRemainTotal">0</b></span></div><div class="actions"><button id="cancelQuality">Cancelar</button><button id="confirmQuality" class="primary">Confirmar Calidad</button></div></div></div></div>
-</main></div><script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script><script type="module" src="app.js?v=27-orden-vertical"></script></body></html>
+</main></div><script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script><script type="module" src="app.js?v=30-programa-maestro-v2"></script></body></html>
