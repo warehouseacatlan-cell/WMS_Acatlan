@@ -20,6 +20,8 @@ let orderRows = [];
 let picklistRows = [];
 let currentPicklistDetail = [];
 let currentPicklistId = null;
+let shipmentRows = [];
+let currentShipmentPicklistId = null;
 
 const $ = s => document.querySelector(s);
 const $$ = s => [...document.querySelectorAll(s)];
