@@ -304,6 +304,21 @@ function buildLocationCandidates(product, lot) {
   });
 }
 
+
+function compareLocationModule(a,b,levelDirection='DESC') {
+  const rackCompare=String(a.rack||'').localeCompare(String(b.rack||''),undefined,{numeric:true,sensitivity:'base'});
+  if(rackCompare!==0) return rackCompare;
+
+  const positionCompare=String(a.position||'').localeCompare(String(b.position||''),undefined,{numeric:true,sensitivity:'base'});
+  if(positionCompare!==0) return positionCompare;
+
+  const levelA=Number(a.level||0);
+  const levelB=Number(b.level||0);
+  if(levelA!==levelB) return levelDirection==='ASC' ? levelA-levelB : levelB-levelA;
+
+  return String(a.code||'').localeCompare(String(b.code||''),undefined,{numeric:true,sensitivity:'base'});
+}
+
 function suggestAllocations(product, lot, totalPieces) {
   const ppt = Number(product.piezas_por_tarima);
   let left = Number(totalPieces);
@@ -313,7 +328,11 @@ function suggestAllocations(product, lot, totalPieces) {
   // 1) Llenar primero ubicaciones que ya tengan el mismo producto+lote,
   // incluso si están en nivel bajo. Se aprovecha primero un resto abierto.
   const same = candidates.filter(x => x.hasSameAssignment)
-    .sort((a,b) => (b.partialSpace > 0) - (a.partialSpace > 0) || a.availablePositions - b.availablePositions || b.level - a.level || a.code.localeCompare(b.code));
+    .sort((a,b) =>
+      (b.partialSpace > 0) - (a.partialSpace > 0) ||
+      compareLocationModule(a,b,'DESC') ||
+      a.availablePositions - b.availablePositions
+    );
 
   for (const c of same) {
     if (left <= 0) break;
@@ -330,14 +349,17 @@ function suggestAllocations(product, lot, totalPieces) {
   const empty = candidates.filter(x => !x.hasSameAssignment && x.existingPieces === 0);
   const positionsNeeded = ceilDiv(left, ppt);
   const exact = empty.filter(x => Number(x.capacity_pallets) === positionsNeeded)
-    .sort((a,b) => Number(b.level||0)-Number(a.level||0) || a.code.localeCompare(b.code));
+    .sort((a,b) => compareLocationModule(a,b,'DESC'));
 
   if (exact.length) {
     out.push({ location_id:exact[0].id, code:exact[0].code, pieces:left });
     return finalizeAllocations(out, ppt);
   }
 
-  const pool = empty.sort((a,b) => Number(b.level||0)-Number(a.level||0) || Number(a.capacity_pallets)-Number(b.capacity_pallets) || a.code.localeCompare(b.code));
+  const pool = empty.sort((a,b) =>
+    compareLocationModule(a,b,'DESC') ||
+    Number(a.capacity_pallets)-Number(b.capacity_pallets)
+  );
   for (const c of pool) {
     if (left <= 0) break;
     const maxPieces = Number(c.capacity_pallets) * ppt;
@@ -933,11 +955,18 @@ function sortTransferCandidates(candidates, x, qty) {
     if (a.hasSame !== b.hasSame) return a.hasSame ? -1 : 1;
     if (a.exact !== b.exact) return a.exact ? -1 : 1;
     if (type === 'RACK') {
-      if (isRemainder && a.nivel !== b.nivel) return Number(a.nivel) - Number(b.nivel);
-      if (!isRemainder && a.nivel !== b.nivel) return Number(b.nivel) - Number(a.nivel);
+      const rackCompare=String(a.rack||'').localeCompare(String(b.rack||''),undefined,{numeric:true,sensitivity:'base'});
+      if(rackCompare!==0) return rackCompare;
+      const positionCompare=String(a.posicion||a.position||'').localeCompare(String(b.posicion||b.position||''),undefined,{numeric:true,sensitivity:'base'});
+      if(positionCompare!==0) return positionCompare;
+      if (a.nivel !== b.nivel) {
+        return isRemainder
+          ? Number(a.nivel) - Number(b.nivel)
+          : Number(b.nivel) - Number(a.nivel);
+      }
     }
     if (a.available !== b.available) return Number(a.available) - Number(b.available);
-    return String(a.ubicacion).localeCompare(String(b.ubicacion));
+    return String(a.ubicacion).localeCompare(String(b.ubicacion),undefined,{numeric:true,sensitivity:'base'});
   });
 }
 
