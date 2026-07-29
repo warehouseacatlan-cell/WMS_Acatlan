@@ -76,3 +76,6 @@
 .master-overdue-row td{background:#fff4f4}
 @media(max-width:1050px){.master-count-summary{grid-template-columns:repeat(3,minmax(130px,1fr))}}
 @media(max-width:650px){.master-count-summary{grid-template-columns:repeat(2,minmax(130px,1fr))}}
+
+/* Modo diagnóstico Programa Maestro V2 */
+.diagnostic-detail{max-width:420px;white-space:normal;word-break:break-word;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px}

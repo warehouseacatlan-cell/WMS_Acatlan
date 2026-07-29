@@ -27,6 +27,8 @@ let currentCycleCountId = null;
 let currentCycleCountDetail = [];
 let countPlanV2Rows = [];
 let countPlanV2Summary = null;
+let countDiagnosticRowsV2 = [];
+let lastCountDiagnosticRunIdV2 = null;
 
 const $ = s => document.querySelector(s);
 const $$ = s => [...document.querySelectorAll(s)];
@@ -2052,6 +2054,101 @@ async function runCountPlanV2() {
     btn.textContent=old;
   }
 }
+
+
+async function runCountDiagnosticV2() {
+  const btn=$('#runCountDiagnosticV2');
+  const old=btn.textContent;
+  btn.disabled=true;
+  btn.textContent='Diagnosticando…';
+
+  try {
+    const limit=Math.max(1,Math.trunc(Number($('#countDiagnosticLimitV2').value||60)));
+    const generate=$('#countDiagnosticModeV2').value==='true';
+
+    if(generate&&!confirm(
+      'Este modo intentará generar conteos reales para identificar errores.\n\n¿Continuar?'
+    )) return;
+
+    const {data,error}=await db.rpc('diagnose_wms_count_plan_today_v2',{
+      p_date:localDateISO(),
+      p_assigned_to:'almacen',
+      p_generated_by:'programa maestro diagnostico',
+      p_location_limit:limit,
+      p_generate_counts:generate
+    });
+
+    if(error) throw error;
+
+    lastCountDiagnosticRunIdV2=data.run_id;
+    await loadCountDiagnosticV2();
+
+    const summary=$('#countDiagnosticSummaryV2');
+    summary.classList.remove('hidden');
+    summary.innerHTML=
+      `<b>Run ID:</b> ${escapeHtml(data.run_id)} · `+
+      `<b>Analizadas:</b> ${Number(data.locations_analyzed||0)} · `+
+      `<b>Generadas:</b> ${Number(data.counts_generated||0)} · `+
+      `<b>Reutilizadas:</b> ${Number(data.counts_reused||0)} · `+
+      `<b>Omitidas:</b> ${Number(data.locations_omitted||0)} · `+
+      `<b>Errores:</b> ${Number(data.errors||0)}`;
+
+  } catch(err) {
+    alert('No se pudo ejecutar el diagnóstico.\n\n'+err.message);
+  } finally {
+    btn.disabled=false;
+    btn.textContent=old;
+  }
+}
+
+async function loadCountDiagnosticV2() {
+  let query=db.from('wms_count_diagnostics_v2_view')
+    .select('*')
+    .order('created_at',{ascending:false})
+    .limit(500);
+
+  if(lastCountDiagnosticRunIdV2){
+    query=query.eq('run_id',lastCountDiagnosticRunIdV2);
+  }
+
+  const {data,error}=await query;
+  if(error){
+    const body=$('#countDiagnosticBodyV2');
+    if(body) body.innerHTML=`<tr><td colspan="7" class="empty">${escapeHtml(error.message)}</td></tr>`;
+    return;
+  }
+
+  countDiagnosticRowsV2=data||[];
+  renderCountDiagnosticV2();
+}
+
+function renderCountDiagnosticV2() {
+  const body=$('#countDiagnosticBodyV2');
+  if(!body) return;
+
+  const filter=$('#countDiagnosticFilterV2')?.value||'ALL';
+  const rows=countDiagnosticRowsV2.filter(x=>filter==='ALL'||x.result===filter);
+
+  body.innerHTML=rows.map(x=>`<tr>
+    <td>${x.created_at?new Date(x.created_at).toLocaleTimeString():'—'}</td>
+    <td><b>${escapeHtml(x.location_code||'—')}</b></td>
+    <td>${escapeHtml(x.sku||'—')}</td>
+    <td>${escapeHtml(x.product_name||'')}</td>
+    <td><span class="order-status">${escapeHtml(x.result||'')}</span></td>
+    <td>${escapeHtml(x.reason||'')}</td>
+    <td class="diagnostic-detail">${escapeHtml(x.detail||'')}</td>
+  </tr>`).join('')||'<tr><td colspan="7" class="empty">Sin registros para este filtro.</td></tr>';
+}
+
+$('#runCountDiagnosticV2')?.addEventListener('click',runCountDiagnosticV2);
+$('#refreshCountDiagnosticV2')?.addEventListener('click',loadCountDiagnosticV2);
+$('#clearCountDiagnosticV2')?.addEventListener('click',()=>{
+  lastCountDiagnosticRunIdV2=null;
+  countDiagnosticRowsV2=[];
+  $('#countDiagnosticSummaryV2')?.classList.add('hidden');
+  renderCountDiagnosticV2();
+});
+$('#countDiagnosticFilterV2')?.addEventListener('change',renderCountDiagnosticV2);
 
 $('#runCountPlanV2')?.addEventListener('click',runCountPlanV2);
 $('#countV2Filter')?.addEventListener('change',renderCountPlanV2);
