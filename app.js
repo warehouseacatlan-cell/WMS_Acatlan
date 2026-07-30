@@ -1087,7 +1087,7 @@ function orderCell(row, idx) {
 }
 
 function parseOrderDate(v) {
-  if (v instanceof Date && !isNaN(v)) return v.toISOString().slice(0,10);
+   if (v instanceof Date && !isNaN(v)) return v.toISOString().slice(0,10);
   if (typeof v === 'number' && window.XLSX?.SSF?.parse_date_code) {
     const x = window.XLSX.SSF.parse_date_code(v);
     if (x) return `${String(x.y).padStart(4,'0')}-${String(x.m).padStart(2,'0')}-${String(x.d).padStart(2,'0')}`;
@@ -2174,4 +2174,3 @@ $('#printPicklist')?.addEventListener('click',printCurrentPicklist);
 $('#takePicklist')?.addEventListener('click',takeCurrentPicklist);
 $('#fillCompletePicking')?.addEventListener('click',fillCompletePicking);
 $('#confirmPicking')?.addEventListener('click',confirmCurrentPicking);
-
