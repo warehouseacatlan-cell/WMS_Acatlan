@@ -1087,7 +1087,7 @@ function orderCell(row, idx) {
 }
 
 function parseOrderDate(v) {
-   if (v instanceof Date && !isNaN(v)) return v.toISOString().slice(0,10);
+  if (v instanceof Date && !isNaN(v)) return v.toISOString().slice(0,10);
   if (typeof v === 'number' && window.XLSX?.SSF?.parse_date_code) {
     const x = window.XLSX.SSF.parse_date_code(v);
     if (x) return `${String(x.y).padStart(4,'0')}-${String(x.m).padStart(2,'0')}-${String(x.d).padStart(2,'0')}`;
@@ -1176,7 +1176,7 @@ function parseOrdersWorkbook(file) {
         const cRef = findOrderColumn(headers,[
           'Movimientos de stock/Referencia',
           'Referencia de entrega','Referencia'
-        ]);
+          ]);
         const cSO = findOrderColumn(headers,[
           'Orden de venta/Referencia de la orden',
           'Orden de venta','Referencia de la orden'
@@ -2174,3 +2174,182 @@ $('#printPicklist')?.addEventListener('click',printCurrentPicklist);
 $('#takePicklist')?.addEventListener('click',takeCurrentPicklist);
 $('#fillCompletePicking')?.addEventListener('click',fillCompletePicking);
 $('#confirmPicking')?.addEventListener('click',confirmCurrentPicking);
+
+/* =====================================================
+   PROGRAMA MAESTRO DE CONTEOS V3
+   Integración directa con Supabase y Conteos Cíclicos
+   ===================================================== */
+let masterCountV3Rows = [];
+
+function installMasterCountV3UI() {
+  const section = $('#conteos');
+  if (!section || $('#masterCountV3Panel')) return;
+
+  const panel = document.createElement('div');
+  panel.id = 'masterCountV3Panel';
+  panel.className = 'panel';
+  panel.innerHTML = `
+    <div class="section-head">
+      <div>
+        <h3>Programa Maestro de Conteos V3</h3>
+        <p class="muted">Calendario automático por ubicación y generación de conteos del día.</p>
+      </div>
+      <div class="detail-actions">
+        <button id="refreshMasterCountV3" type="button">Actualizar</button>
+      </div>
+    </div>
+    <div class="grid">
+      <label>Fecha inicial<input id="masterCountV3Start" type="date"></label>
+      <label>Días a programar<input id="masterCountV3Days" type="number" min="1" max="366" value="30"></label>
+      <label>Fecha a ejecutar<input id="masterCountV3RunDate" type="date"></label>
+      <label>Límite de ubicaciones<input id="masterCountV3Limit" type="number" min="1" max="200" value="30"></label>
+    </div>
+    <div class="actions">
+      <button id="generateMasterCalendarV3" class="primary" type="button">Generar calendario</button>
+      <button id="runMasterCountsV3" class="primary" type="button">Generar conteos del día</button>
+    </div>
+    <div class="operation-cards">
+      <article><b id="masterCountV3Pending">0</b><span>Pendientes</span></article>
+      <article><b id="masterCountV3Today">0</b><span>Programados en fecha</span></article>
+      <article><b id="masterCountV3Generated">0</b><span>Generados</span></article>
+      <article><b id="masterCountV3Locations">0</b><span>Ubicaciones programadas</span></article>
+    </div>
+    <div class="table-wrap"><table>
+      <thead><tr><th>Fecha</th><th>Ubicación</th><th>Clasificación</th><th>Estatus</th><th>Conteo</th></tr></thead>
+      <tbody id="masterCountV3Body"><tr><td colspan="5" class="empty">Pulsa Actualizar.</td></tr></tbody>
+    </table></div>`;
+
+  section.insertBefore(panel, section.firstElementChild);
+  const today = localDateISO();
+  $('#masterCountV3Start').value = today.slice(0, 8) + '01';
+  $('#masterCountV3RunDate').value = today;
+  $('#refreshMasterCountV3').addEventListener('click', loadMasterCountV3);
+  $('#generateMasterCalendarV3').addEventListener('click', generateMasterCalendarV3);
+  $('#runMasterCountsV3').addEventListener('click', runMasterCountsV3);
+}
+
+function masterLocationLabelV3(locationId) {
+  return locations.find(x => String(x.id) === String(locationId))?.ubicacion || locationId || '—';
+}
+
+async function loadMasterCountV3() {
+  installMasterCountV3UI();
+  const body = $('#masterCountV3Body');
+  if (!body) return;
+  body.innerHTML = '<tr><td colspan="5" class="empty">Cargando…</td></tr>';
+
+  const { data, error } = await db.from('wms_master_count_calendar')
+    .select('id,scheduled_date,location_id,classification,planned,generated,cycle_count_id,created_at')
+    .order('scheduled_date', { ascending: true })
+    .order('id', { ascending: true })
+    .limit(2000);
+
+  if (error) {
+    body.innerHTML = `<tr><td colspan="5" class="empty">${escapeHtml(error.message)}</td></tr>`;
+    return;
+  }
+
+  masterCountV3Rows = data || [];
+  const runDate = $('#masterCountV3RunDate')?.value || localDateISO();
+  $('#masterCountV3Pending').textContent = masterCountV3Rows.filter(x => !x.generated).length.toLocaleString();
+  $('#masterCountV3Today').textContent = masterCountV3Rows.filter(x => x.scheduled_date === runDate && !x.generated).length.toLocaleString();
+  $('#masterCountV3Generated').textContent = masterCountV3Rows.filter(x => x.generated).length.toLocaleString();
+  $('#masterCountV3Locations').textContent = new Set(masterCountV3Rows.map(x => x.location_id)).size.toLocaleString();
+
+  body.innerHTML = masterCountV3Rows.map(x => `<tr>
+    <td>${escapeHtml(x.scheduled_date || '—')}</td>
+    <td><b>${escapeHtml(masterLocationLabelV3(x.location_id))}</b></td>
+    <td><span class="classification-badge">${escapeHtml(x.classification || '—')}</span></td>
+    <td><span class="order-status">${x.generated ? 'GENERADO' : 'PROGRAMADO'}</span></td>
+    <td>${x.cycle_count_id ? escapeHtml(String(x.cycle_count_id).slice(0, 8)) : '—'}</td>
+  </tr>`).join('') || '<tr><td colspan="5" class="empty">No hay calendario generado.</td></tr>';
+}
+
+async function generateMasterCalendarV3() {
+  const button = $('#generateMasterCalendarV3');
+  const startDate = $('#masterCountV3Start')?.value;
+  const days = Math.max(1, Math.trunc(Number($('#masterCountV3Days')?.value || 30)));
+  if (!startDate) return alert('Selecciona la fecha inicial.');
+  const old = button.textContent;
+  button.disabled = true;
+  button.textContent = 'Generando…';
+  try {
+    const { data, error } = await db.rpc('wms_master_generate_calendar', {
+      p_start_date: startDate,
+      p_days: days
+    });
+    if (error) throw error;
+    await loadMasterCountV3();
+    alert(`Calendario V3 generado correctamente.\nRegistros programados: ${Number(data || 0).toLocaleString()}`);
+  } catch (err) {
+    alert('No se pudo generar el calendario V3.\n\n' + err.message);
+  } finally {
+    button.disabled = false;
+    button.textContent = old;
+  }
+}
+
+async function runMasterCountsV3() {
+  const button = $('#runMasterCountsV3');
+  const runDate = $('#masterCountV3RunDate')?.value || localDateISO();
+  const limit = Math.max(1, Math.trunc(Number($('#masterCountV3Limit')?.value || 30)));
+  const old = button.textContent;
+  button.disabled = true;
+  button.textContent = 'Procesando…';
+
+  try {
+    const { data: pending, error } = await db.from('v_wms_master_pending')
+      .select('id,scheduled_date,location_id,classification')
+      .eq('scheduled_date', runDate)
+      .order('id', { ascending: true })
+      .limit(limit);
+    if (error) throw error;
+    if (!pending?.length) {
+      alert(`No hay ubicaciones pendientes programadas para ${runDate}.`);
+      return;
+    }
+
+    let generated = 0;
+    const failures = [];
+    for (const item of pending) {
+      const location = masterLocationLabelV3(item.location_id);
+      const result = await db.rpc('generate_wms_cycle_count', {
+        p_location_id: item.location_id,
+        p_assigned_to_name: 'almacen',
+        p_generated_by_name: 'programa maestro v3',
+        p_notes: `Programa Maestro V3 · ${item.classification || 'SIN CLASE'} · ${runDate}`
+      });
+      if (result.error) {
+        failures.push(`${location}: ${result.error.message}`);
+        continue;
+      }
+      const cycleCountId = result.data?.cycle_count_id;
+      if (!cycleCountId) {
+        failures.push(`${location}: la función no devolvió cycle_count_id`);
+        continue;
+      }
+      const linked = await db.rpc('wms_master_link_cycle_count', {
+        p_calendar_id: item.id,
+        p_cycle_count_id: cycleCountId
+      });
+      if (linked.error) {
+        failures.push(`${location}: conteo creado, pero no se pudo vincular (${linked.error.message})`);
+        continue;
+      }
+      generated += 1;
+    }
+
+    await refreshCycleCounts();
+    await loadMasterCountV3();
+    const detail = failures.length ? `\n\nNo procesados (${failures.length}):\n${failures.slice(0, 8).join('\n')}` : '';
+    alert(`Programa Maestro V3 terminado.\nConteos generados: ${generated}\nNo procesados: ${failures.length}${detail}`);
+  } catch (err) {
+    alert('No se pudieron generar los conteos del Programa Maestro V3.\n\n' + err.message);
+  } finally {
+    button.disabled = false;
+    button.textContent = old;
+  }
+}
+
+installMasterCountV3UI();
+document.querySelector('nav button[data-view="conteos"]')?.addEventListener('click', loadMasterCountV3);
