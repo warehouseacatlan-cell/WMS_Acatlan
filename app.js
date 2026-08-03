@@ -81,18 +81,15 @@ async function restoreSession() {
 }
 let adminUserRows = [];
 
-async function invokeAdminUsers(action, payload = {}) {
-  // Obtiene la sesión vigente del administrador.
-  let { data: sessionData, error: sessionError } = await db.auth.getSession();
+async function invokeAdminUsers(action, payload={}) {
+  const { data: sessionData, error: sessionError } = await db.auth.getSession();
   if (sessionError) throw new Error(`No se pudo obtener la sesión: ${sessionError.message}`);
 
-  let session = sessionData?.session || null;
-
-  // Si la sesión no tiene token, intenta renovarla una sola vez.
+  let session = sessionData?.session;
   if (!session?.access_token) {
-    const { data: refreshData, error: refreshError } = await db.auth.refreshSession();
-    if (refreshError) throw new Error(`No se pudo renovar la sesión: ${refreshError.message}`);
-    session = refreshData?.session || null;
+    const { data: refreshedData, error: refreshError } = await db.auth.refreshSession();
+    if (refreshError) throw new Error(`La sesión expiró: ${refreshError.message}`);
+    session = refreshedData?.session;
   }
 
   if (!session?.access_token) {
@@ -103,30 +100,24 @@ async function invokeAdminUsers(action, payload = {}) {
     headers: {
       Authorization: `Bearer ${session.access_token}`,
     },
-    body: {
-      action,
-      ...payload,
-    },
+    body: { action, ...payload },
   });
 
   if (error) {
-    let message = error.message || 'No se pudo completar la operación.';
-
-    // Supabase entrega la respuesta de la Edge Function en error.context.
+    let message = error.message || 'No fue posible ejecutar la administración de usuarios.';
     if (error.context) {
       try {
         const detail = await error.context.json();
         message = detail?.error || detail?.detail || detail?.message || message;
-      } catch {
-        // Mantiene el mensaje original cuando la respuesta no contiene JSON.
+      } catch (_) {
+        // Conserva el mensaje original cuando la respuesta no es JSON.
       }
     }
-
     throw new Error(message);
   }
 
   if (!data?.ok) {
-    throw new Error(data?.error || data?.detail || 'No se pudo completar la operación.');
+    throw new Error(data?.error || data?.detail || 'La operación de usuarios no pudo completarse.');
   }
 
   return data;
@@ -1957,12 +1948,55 @@ function countStageLabel(stage='') {
 function isOpenCount(stage='') {
   return ['PRIMER_CONTEO','SEGUNDO_CONTEO','CONTEO_PRODUCTO'].includes(stage);
 }
+function getCountableLocations() {
+  // Solo ubicaciones con inventario físico mayor a cero.
+  // Se soportan distintas versiones de inventory_detail: por UUID o por código.
+  const occupiedIds = new Set();
+  const occupiedCodes = new Set();
+
+  inventoryRows.forEach(row => {
+    if (Number(row.physical_pieces || 0) <= 0) return;
+    const locationId = row.location_id || row.location_uuid || row.inventory_location_id;
+    if (locationId) occupiedIds.add(String(locationId));
+    if (row.location) occupiedCodes.add(normalizeText(row.location));
+    if (row.location_code) occupiedCodes.add(normalizeText(row.location_code));
+  });
+
+  return locations
+    .filter(location =>
+      occupiedIds.has(String(location.id)) ||
+      occupiedCodes.has(normalizeText(location.ubicacion))
+    )
+    .sort((a, b) => String(a.ubicacion).localeCompare(String(b.ubicacion), undefined, {
+      numeric: true,
+      sensitivity: 'base'
+    }));
+}
+
 function fillCountLocations() {
-  const select=$('#countLocation');
-  if(!select) return;
-  const previous=select.value;
-  select.innerHTML='<option value="">Selecciona una ubicación</option>'+locations.map(l=>`<option value="${escapeHtml(l.id)}">${escapeHtml(l.ubicacion)} · ${escapeHtml(l.location_type)}</option>`).join('');
-  select.value=previous;
+  const select = $('#countLocation');
+  if (!select) return;
+
+  const previous = new Set([...select.selectedOptions].map(option => option.value));
+  const countableLocations = getCountableLocations();
+
+  select.innerHTML = countableLocations.map(location =>
+    `<option value="${escapeHtml(location.id)}">${escapeHtml(location.ubicacion)} · ${escapeHtml(location.location_type)}</option>`
+  ).join('');
+
+  [...select.options].forEach(option => {
+    option.selected = previous.has(option.value);
+  });
+
+  const info = $('#countLocationInfo');
+  if (info) {
+    info.textContent = countableLocations.length
+      ? `${countableLocations.length} ubicaciones con inventario disponibles. Usa Ctrl para seleccionar varias.`
+      : 'No existen ubicaciones con inventario físico para contar.';
+  }
+
+  const button = $('#createLocationCount');
+  if (button) button.disabled = countableLocations.length === 0;
 }
 async function refreshCycleCounts() {
   if(!$('#cycleCountsBody')) return;
@@ -1992,19 +2026,72 @@ function renderCycleCounts() {
   </tr>`).join('')||'<tr><td colspan="7" class="empty">Sin conteos.</td></tr>';
 }
 async function createLocationCount() {
-  const locationId=$('#countLocation').value;
-  if(!locationId) return alert('Selecciona una ubicación.');
-  if(!confirm('Se tomará una fotografía del inventario teórico de esta ubicación. ¿Lanzar conteo ciego?')) return;
-  const btn=$('#createLocationCount'); btn.disabled=true;
+  const select = $('#countLocation');
+  const locationIds = [...select.selectedOptions].map(option => option.value).filter(Boolean);
+
+  if (!locationIds.length) return alert('Selecciona al menos una ubicación.');
+
+  const selectedNames = [...select.selectedOptions].map(option => option.textContent.trim());
+  const confirmation = locationIds.length === 1
+    ? `Se tomará una fotografía del inventario teórico de ${selectedNames[0]}. ¿Lanzar conteo ciego?`
+    : `Se crearán ${locationIds.length} conteos ciegos independientes, uno por ubicación. ¿Continuar?`;
+
+  if (!confirm(confirmation)) return;
+
+  const btn = $('#createLocationCount');
+  const originalText = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = `Creando 0 de ${locationIds.length}…`;
+
+  const observations = $('#countObservations').value.trim() || null;
+  const created = [];
+  const failed = [];
+
   try {
-    const {data,error}=await db.rpc('wms_create_location_count',{p_location_id:locationId,p_observations:$('#countObservations').value.trim()||null});
-    if(error) throw error;
-    $('#countObservations').value='';
+    for (let index = 0; index < locationIds.length; index += 1) {
+      btn.textContent = `Creando ${index + 1} de ${locationIds.length}…`;
+      const locationId = locationIds[index];
+      const locationName = selectedNames[index];
+
+      const { data, error } = await db.rpc('wms_create_location_count', {
+        p_location_id: locationId,
+        p_observations: observations
+      });
+
+      if (error) {
+        failed.push({ location: locationName, error: error.message });
+      } else {
+        created.push(data);
+      }
+    }
+
+    $('#countObservations').value = '';
+    [...select.options].forEach(option => { option.selected = false; });
     await refreshCycleCounts();
-    alert(`Conteo creado: ${data.folio}\nUbicación: ${data.location}\nLíneas: ${data.lines}`);
-    await openCycleCount(data.id);
-  } catch(err){ alert('No se pudo lanzar el conteo.\n\n'+err.message); }
-  finally{ btn.disabled=false; }
+
+    const summary = [];
+    if (created.length) {
+      summary.push(`${created.length} conteo(s) creado(s) correctamente.`);
+      summary.push(created.map(item => `${item.folio} · ${item.location} · ${item.lines} línea(s)`).join('\n'));
+    }
+    if (failed.length) {
+      summary.push(`No se crearon ${failed.length} conteo(s):`);
+      summary.push(failed.map(item => `${item.location}: ${item.error}`).join('\n'));
+    }
+
+    alert(summary.join('\n\n'));
+
+    // Si solo se creó uno, abrirlo directamente para capturarlo.
+    if (created.length === 1 && failed.length === 0) {
+      await openCycleCount(created[0].id);
+    }
+  } catch (err) {
+    alert('No se pudieron lanzar los conteos.\n\n' + (err.message || err));
+  } finally {
+    btn.disabled = false;
+    btn.textContent = originalText;
+    fillCountLocations();
+  }
 }
 async function openCycleCount(id) {
   try {
