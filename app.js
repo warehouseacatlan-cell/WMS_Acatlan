@@ -82,37 +82,26 @@ async function restoreSession() {
 let adminUserRows = [];
 
 async function invokeAdminUsers(action, payload = {}) {
-  const {
-    data: { session },
-    error: sessionError,
-  } = await db.auth.getSession();
+  // Obtiene la sesión vigente del administrador.
+  let { data: sessionData, error: sessionError } = await db.auth.getSession();
+  if (sessionError) throw new Error(`No se pudo obtener la sesión: ${sessionError.message}`);
 
-  if (sessionError) {
-    throw new Error(`No se pudo obtener la sesión: ${sessionError.message}`);
+  let session = sessionData?.session || null;
+
+  // Si la sesión no tiene token, intenta renovarla una sola vez.
+  if (!session?.access_token) {
+    const { data: refreshData, error: refreshError } = await db.auth.refreshSession();
+    if (refreshError) throw new Error(`No se pudo renovar la sesión: ${refreshError.message}`);
+    session = refreshData?.session || null;
   }
 
-  let activeSession = session;
-
-  if (!activeSession?.access_token) {
-    const {
-      data: { session: refreshedSession },
-      error: refreshError,
-    } = await db.auth.refreshSession();
-
-    if (refreshError) {
-      throw new Error(`No se pudo renovar la sesión: ${refreshError.message}`);
-    }
-
-    activeSession = refreshedSession;
-  }
-
-  if (!activeSession?.access_token) {
+  if (!session?.access_token) {
     throw new Error('La sesión expiró. Cierra sesión y vuelve a ingresar.');
   }
 
   const { data, error } = await db.functions.invoke('admin-users', {
     headers: {
-      Authorization: `Bearer ${activeSession.access_token}`,
+      Authorization: `Bearer ${session.access_token}`,
     },
     body: {
       action,
@@ -121,18 +110,15 @@ async function invokeAdminUsers(action, payload = {}) {
   });
 
   if (error) {
-    let message = error.message || 'No se pudo ejecutar la operación de usuarios.';
+    let message = error.message || 'No se pudo completar la operación.';
 
+    // Supabase entrega la respuesta de la Edge Function en error.context.
     if (error.context) {
       try {
         const detail = await error.context.json();
-        message =
-          detail?.error ||
-          detail?.detail ||
-          detail?.message ||
-          message;
+        message = detail?.error || detail?.detail || detail?.message || message;
       } catch {
-        // Conserva el mensaje original cuando la respuesta no contiene JSON.
+        // Mantiene el mensaje original cuando la respuesta no contiene JSON.
       }
     }
 
@@ -140,15 +126,12 @@ async function invokeAdminUsers(action, payload = {}) {
   }
 
   if (!data?.ok) {
-    throw new Error(
-      data?.error ||
-      data?.detail ||
-      'No se pudo completar la operación de usuarios.'
-    );
+    throw new Error(data?.error || data?.detail || 'No se pudo completar la operación.');
   }
 
   return data;
 }
+
 function roleLabel(role='') {
   return String(role).replaceAll('_',' ').toLowerCase().replace(/(^|\s)\S/g, c => c.toUpperCase());
 }
