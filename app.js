@@ -79,12 +79,61 @@ async function restoreSession() {
     catch (err) { await db.auth.signOut(); console.error(err); }
   }
 }
+let adminUserRows = [];
+
+async function invokeAdminUsers(action, payload={}) {
+  const { data, error } = await db.functions.invoke('admin-users', { body: { action, ...payload } });
+  if (error) throw new Error(error.message || 'No fue posible ejecutar la administración de usuarios.');
+  if (!data?.ok) throw new Error(data?.error || 'La operación de usuarios no pudo completarse.');
+  return data;
+}
+
+function roleLabel(role='') {
+  return String(role).replaceAll('_',' ').toLowerCase().replace(/(^|\s)\S/g, c => c.toUpperCase());
+}
+
 async function renderUsers() {
   if (!$('#usersBody') || normalizedRole() !== 'ADMINISTRADOR') return;
-  const { data, error } = await db.from('profiles').select('username,full_name,role,active,created_at').order('full_name');
-  if (error) { $('#usersBody').innerHTML = `<tr><td colspan="5" class="empty">${escapeHtml(error.message)}</td></tr>`; return; }
-  $('#usersBody').innerHTML = (data || []).map(u => `<tr><td>${escapeHtml(u.username||'—')}</td><td>${escapeHtml(u.full_name)}</td><td>${escapeHtml(u.role)}</td><td>${u.active?'Sí':'No'}</td><td>${u.created_at?new Date(u.created_at).toLocaleString():'—'}</td></tr>`).join('') || '<tr><td colspan="5" class="empty">Sin usuarios.</td></tr>';
+  $('#usersBody').innerHTML = '<tr><td colspan="6" class="empty">Cargando usuarios…</td></tr>';
+  const { data, error } = await db.from('profiles').select('id,username,full_name,role,active,created_at').order('full_name');
+  if (error) { $('#usersBody').innerHTML = `<tr><td colspan="6" class="empty">${escapeHtml(error.message)}</td></tr>`; return; }
+  adminUserRows = data || [];
+  $('#usersBody').innerHTML = adminUserRows.map(u => `<tr>
+    <td><b>${escapeHtml(u.username||'—')}</b></td>
+    <td>${escapeHtml(u.full_name||'—')}</td>
+    <td><span class="user-role">${escapeHtml(roleLabel(u.role))}</span></td>
+    <td><span class="user-state ${u.active?'active':'inactive'}">${u.active?'Activo':'Inactivo'}</span></td>
+    <td>${u.created_at?new Date(u.created_at).toLocaleString():'—'}</td>
+    <td><div class="user-actions"><button class="edit-user" data-id="${u.id}">Editar</button><button class="reset-user-password" data-id="${u.id}">Contraseña</button><button class="toggle-user ${u.active?'danger-soft':'success-soft'}" data-id="${u.id}" data-active="${u.active}" ${u.id===currentProfile?.id?'disabled title="No puedes desactivar tu propia cuenta"':''}>${u.active?'Desactivar':'Activar'}</button></div></td>
+  </tr>`).join('') || '<tr><td colspan="6" class="empty">Sin usuarios.</td></tr>';
 }
+
+function openUserModal(user=null) {
+  $('#userForm').reset();
+  $('#userFormStatus').textContent = '';
+  $('#editUserId').value = user?.id || '';
+  $('#newFullName').value = user?.full_name || '';
+  $('#newUsername').value = user?.username || '';
+  $('#newUsername').disabled = Boolean(user);
+  $('#newUserRole').value = user?.role || 'ALMACENISTA';
+  $('#newUserPassword').required = !user;
+  $('#passwordLabel').classList.toggle('hidden', Boolean(user));
+  $('#userModalTitle').textContent = user ? 'Editar usuario' : 'Nuevo usuario';
+  $('#userModalHelp').textContent = user ? `Actualiza nombre y rol de ${user.username}.` : 'Captura los datos de acceso y asigna el rol.';
+  $('#saveUserBtn').textContent = user ? 'Guardar cambios' : 'Crear usuario';
+  $('#userModal').classList.remove('hidden');
+  setTimeout(() => $('#newFullName').focus(), 50);
+}
+function closeUserModal() { $('#userModal').classList.add('hidden'); }
+function openPasswordModal(user) {
+  $('#passwordForm').reset();
+  $('#passwordFormStatus').textContent = '';
+  $('#passwordUserId').value = user.id;
+  $('#passwordUserLabel').textContent = `${user.full_name} (${user.username})`;
+  $('#passwordModal').classList.remove('hidden');
+  setTimeout(() => $('#resetUserPassword').focus(), 50);
+}
+function closePasswordModal() { $('#passwordModal').classList.add('hidden'); }
 
 const $ = s => document.querySelector(s);
 const $$ = s => [...document.querySelectorAll(s)];
@@ -199,6 +248,56 @@ $('#loginBtn').onclick = async () => {
 $('#pass').addEventListener('keydown', e => { if (e.key === 'Enter') $('#loginBtn').click(); });
 $('#logout').onclick = async () => { await db.auth.signOut(); location.reload(); };
 if ($('#refreshUsers')) $('#refreshUsers').onclick = renderUsers;
+if ($('#newUserBtn')) $('#newUserBtn').onclick = () => openUserModal();
+if ($('#closeUserModal')) $('#closeUserModal').onclick = closeUserModal;
+if ($('#cancelUser')) $('#cancelUser').onclick = closeUserModal;
+if ($('#closePasswordModal')) $('#closePasswordModal').onclick = closePasswordModal;
+if ($('#cancelPassword')) $('#cancelPassword').onclick = closePasswordModal;
+
+if ($('#usersBody')) $('#usersBody').addEventListener('click', async e => {
+  const button = e.target.closest('button[data-id]');
+  if (!button) return;
+  const user = adminUserRows.find(u => u.id === button.dataset.id);
+  if (!user) return;
+  if (button.classList.contains('edit-user')) return openUserModal(user);
+  if (button.classList.contains('reset-user-password')) return openPasswordModal(user);
+  if (button.classList.contains('toggle-user')) {
+    const nextActive = button.dataset.active !== 'true';
+    if (!confirm(`${nextActive?'Activar':'Desactivar'} a ${user.full_name}?`)) return;
+    button.disabled = true;
+    try { await invokeAdminUsers('set_active', { user_id:user.id, active:nextActive }); await renderUsers(); }
+    catch (err) { alert(err.message); button.disabled = false; }
+  }
+});
+
+if ($('#userForm')) $('#userForm').addEventListener('submit', async e => {
+  e.preventDefault();
+  const editingId = $('#editUserId').value;
+  const full_name = $('#newFullName').value.trim();
+  const username = normalizeUsername($('#newUsername').value);
+  const role = $('#newUserRole').value;
+  const password = $('#newUserPassword').value;
+  const status = $('#userFormStatus');
+  if (!full_name || (!editingId && !username)) return;
+  if (!editingId && password.length < 8) { status.textContent='La contraseña debe tener al menos 8 caracteres.'; status.dataset.state='error'; return; }
+  $('#saveUserBtn').disabled = true; status.textContent='Guardando usuario…'; delete status.dataset.state;
+  try {
+    if (editingId) await invokeAdminUsers('update', { user_id:editingId, full_name, role });
+    else await invokeAdminUsers('create', { username, full_name, role, password });
+    closeUserModal(); await renderUsers();
+  } catch (err) { status.textContent=err.message; status.dataset.state='error'; }
+  finally { $('#saveUserBtn').disabled=false; }
+});
+
+if ($('#passwordForm')) $('#passwordForm').addEventListener('submit', async e => {
+  e.preventDefault();
+  const user_id=$('#passwordUserId').value, password=$('#resetUserPassword').value, status=$('#passwordFormStatus');
+  if (password.length < 8) { status.textContent='La contraseña debe tener al menos 8 caracteres.'; status.dataset.state='error'; return; }
+  $('#savePasswordBtn').disabled=true; status.textContent='Actualizando contraseña…'; delete status.dataset.state;
+  try { await invokeAdminUsers('reset_password', { user_id, password }); closePasswordModal(); alert('Contraseña actualizada correctamente.'); }
+  catch(err) { status.textContent=err.message; status.dataset.state='error'; }
+  finally { $('#savePasswordBtn').disabled=false; }
+});
 restoreSession();
 
 $$('nav button').forEach(b => b.onclick = () => {
