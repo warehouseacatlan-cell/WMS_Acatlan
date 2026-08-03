@@ -1936,6 +1936,8 @@ $('#confirmPicking')?.addEventListener('click',confirmCurrentPicking);
 // ==================== CONTEOS POR UBICACIÓN ====================
 let cycleCountRows = [];
 let currentCycleCount = null;
+let adjustmentRows = [];
+let currentAdjustment = null;
 
 function countStageLabel(stage='') {
   return ({
@@ -2007,6 +2009,7 @@ async function refreshCycleCounts() {
     cycleCountRows=Array.isArray(data)?data:[];
     renderCycleCounts();
     setDashText('dashCounts',cycleCountRows.filter(x=>isOpenCount(x.workflow_stage)).length);
+    await refreshCountAdjustments();
   } catch(err) {
     console.error(err);
     $('#cycleCountsBody').innerHTML=`<tr><td colspan="7" class="empty">${escapeHtml(err.message)}. Ejecuta primero 03_habilitar_conteos_por_ubicacion.sql.</td></tr>`;
@@ -2133,11 +2136,97 @@ async function submitCycleCount() {
   finally{ btn.disabled=false; btn.textContent='Confirmar conteo'; }
 }
 
+
+function adjustmentStatusLabel(status='') {
+  return ({BORRADOR:'Pendiente',PENDIENTE_AUTORIZACION:'Pendiente',APLICADO:'Aplicado',RECHAZADO:'Rechazado'})[status] || String(status).replaceAll('_',' ');
+}
+async function refreshCountAdjustments() {
+  if (!$('#adjustmentsBody')) return;
+  try {
+    const { data, error } = await db.rpc('wms_get_count_adjustments');
+    if (error) throw error;
+    adjustmentRows = Array.isArray(data) ? data : [];
+    renderCountAdjustments();
+    const pending = adjustmentRows.filter(row => ['BORRADOR','PENDIENTE_AUTORIZACION'].includes(String(row.status)));
+    setDashText('dashAdjustments', pending.length);
+  } catch (err) {
+    console.error(err);
+    $('#adjustmentsBody').innerHTML = `<tr><td colspan="8" class="empty">${escapeHtml(err.message)}. Ejecuta 05_habilitar_aprobacion_ajustes.sql.</td></tr>`;
+  }
+}
+function renderCountAdjustments() {
+  const q = normalizeText($('#adjustmentFilter')?.value || '');
+  const rows = adjustmentRows.filter(row => normalizeText(`${row.folio} ${row.reason} ${row.skus||''} ${row.products||''} ${row.locations||''} ${row.status}`).includes(q));
+  const pending = adjustmentRows.filter(row => ['BORRADOR','PENDIENTE_AUTORIZACION'].includes(String(row.status))).length;
+  $('#adjustmentBadge').textContent = `${pending} pendientes`;
+  $('#adjustmentsBody').innerHTML = rows.map(row => {
+    const canResolve = ['BORRADOR','PENDIENTE_AUTORIZACION'].includes(String(row.status));
+    const diff = Number(row.net_adjustment || 0);
+    return `<tr>
+      <td><b>${escapeHtml(row.folio)}</b></td><td>${escapeHtml(row.reason||'—')}</td><td>${Number(row.line_count||0)}</td>
+      <td><b>${diff>0?'+':''}${diff.toLocaleString()}</b></td><td>${escapeHtml(row.requested_by_name||'—')}</td>
+      <td>${row.created_at?new Date(row.created_at).toLocaleString():'—'}</td>
+      <td><span class="count-stage ${escapeHtml(row.status)}">${escapeHtml(adjustmentStatusLabel(row.status))}</span></td>
+      <td><button class="mini open-adjustment" data-id="${escapeHtml(row.id)}">${canResolve?'Revisar':'Ver'}</button></td>
+    </tr>`;
+  }).join('') || '<tr><td colspan="8" class="empty">Sin ajustes.</td></tr>';
+}
+async function openCountAdjustment(id) {
+  try {
+    const { data, error } = await db.rpc('wms_get_count_adjustment_detail', { p_adjustment_id:id });
+    if (error) throw error;
+    currentAdjustment = data;
+    $('#adjustmentDetailTitle').textContent = `${data.folio} · ${adjustmentStatusLabel(data.status)}`;
+    $('#adjustmentDetailHelp').textContent = `${data.reason||'Ajuste de inventario'} · Solicitado por ${data.requested_by_name||'—'}`;
+    $('#adjustmentDetailBody').innerHTML = (data.lines||[]).map(line => {
+      const diff=Number(line.adjustment_pieces||0);
+      return `<tr><td><b>${escapeHtml(line.location)}</b></td><td>${escapeHtml(line.sku)}</td><td>${escapeHtml(line.product)}</td><td>${escapeHtml(line.lot)}</td>
+        <td>${Number(line.previous_pieces||0).toLocaleString()}</td><td><b>${diff>0?'+':''}${diff.toLocaleString()}</b></td><td><b>${Number(line.resulting_pieces||0).toLocaleString()}</b></td><td>${Number(line.reserved_pieces||0).toLocaleString()}</td></tr>`;
+    }).join('');
+    $('#adjustmentApprovalNotes').value='';
+    const pending=['BORRADOR','PENDIENTE_AUTORIZACION'].includes(String(data.status));
+    $('#approveAdjustment').classList.toggle('hidden',!pending || normalizedRole()!=='ADMINISTRADOR');
+    $('#rejectAdjustment').classList.toggle('hidden',!pending || normalizedRole()!=='ADMINISTRADOR');
+    $('#adjustmentDetailPanel').classList.remove('hidden');
+    $('#adjustmentDetailPanel').scrollIntoView({behavior:'smooth',block:'start'});
+  } catch(err) { alert('No se pudo abrir el ajuste.\n\n'+(err.message||err)); }
+}
+async function resolveCountAdjustment(action) {
+  if (!currentAdjustment) return;
+  if (normalizedRole()!=='ADMINISTRADOR') return alert('Solo el Administrador puede autorizar ajustes.');
+  const approve=action==='APROBAR';
+  const promptText=approve
+    ? `¿Aprobar y aplicar el ajuste ${currentAdjustment.folio}? El inventario cambiará inmediatamente.`
+    : `¿Rechazar el ajuste ${currentAdjustment.folio}? No se modificará el inventario.`;
+  if(!confirm(promptText)) return;
+  const button=approve?$('#approveAdjustment'):$('#rejectAdjustment');
+  button.disabled=true; const old=button.textContent; button.textContent=approve?'Aplicando…':'Rechazando…';
+  try {
+    const {data,error}=await db.rpc('wms_resolve_count_adjustment',{
+      p_adjustment_id:currentAdjustment.id,
+      p_action:action,
+      p_observations:$('#adjustmentApprovalNotes').value.trim()||null
+    });
+    if(error) throw error;
+    alert(data.message);
+    $('#adjustmentDetailPanel').classList.add('hidden'); currentAdjustment=null;
+    await refreshOperationalData();
+    await refreshCycleCounts();
+  } catch(err) { alert('No se pudo procesar el ajuste.\n\n'+(err.message||err)); }
+  finally { button.disabled=false; button.textContent=old; }
+}
+
 document.addEventListener('click',event=>{
   const b=event.target.closest('.open-count'); if(b) openCycleCount(b.dataset.id);
+  const a=event.target.closest('.open-adjustment'); if(a) openCountAdjustment(a.dataset.id);
 });
 $('#createLocationCount')?.addEventListener('click',createLocationCount);
 $('#refreshCounts')?.addEventListener('click',refreshCycleCounts);
 $('#countFilter')?.addEventListener('input',renderCycleCounts);
 $('#closeCountDetail')?.addEventListener('click',()=>{$('#countDetailPanel').classList.add('hidden');currentCycleCount=null;});
 $('#submitCount')?.addEventListener('click',submitCycleCount);
+$('#refreshAdjustments')?.addEventListener('click',refreshCountAdjustments);
+$('#adjustmentFilter')?.addEventListener('input',renderCountAdjustments);
+$('#closeAdjustmentDetail')?.addEventListener('click',()=>{$('#adjustmentDetailPanel').classList.add('hidden');currentAdjustment=null;});
+$('#approveAdjustment')?.addEventListener('click',()=>resolveCountAdjustment('APROBAR'));
+$('#rejectAdjustment')?.addEventListener('click',()=>resolveCountAdjustment('RECHAZAR'));
