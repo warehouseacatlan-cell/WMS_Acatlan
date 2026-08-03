@@ -22,6 +22,68 @@ let currentPicklistDetail = [];
 let currentPicklistId = null;
 let shipmentRows = [];
 let currentShipmentPicklistId = null;
+let currentAuthUser = null;
+let currentProfile = null;
+
+
+const ROLE_PERMISSIONS = {
+  ADMINISTRADOR: ['dashboard','recepcion','productos','ubicaciones','pedidos','picklists','embarques','calidad','inventario','transferencias','usuarios'],
+  SUPERVISOR: ['dashboard','recepcion','productos','ubicaciones','pedidos','picklists','embarques','calidad','inventario','transferencias'],
+  SUPERVISOR_DE_ALMACEN: ['dashboard','recepcion','productos','ubicaciones','pedidos','picklists','embarques','calidad','inventario','transferencias'],
+  ALMACENISTA: ['dashboard','recepcion','picklists','inventario','transferencias'],
+  CALIDAD: ['dashboard','calidad','inventario'],
+  EMBARQUES: ['dashboard','picklists','embarques','inventario'],
+  CONSULTA: ['dashboard','productos','ubicaciones','inventario']
+};
+
+function normalizeUsername(value='') {
+  return String(value).trim().toLowerCase().replace(/\s+/g,'.').replace(/[^a-z0-9._-]/g,'');
+}
+function loginEmailForUsername(username) {
+  return `${normalizeUsername(username)}@wms-acatlan.app`;
+}
+function currentOperatorName() {
+  return currentProfile?.full_name || currentProfile?.username || normalizeUsername($('#user')?.value) || 'usuario';
+}
+function normalizedRole() {
+  return String(currentProfile?.role || 'CONSULTA').trim().toUpperCase().replace(/\s+/g,'_');
+}
+function applyRolePermissions() {
+  const role = normalizedRole();
+  const allowed = ROLE_PERMISSIONS[role] || ROLE_PERMISSIONS.CONSULTA;
+  $$('nav button[data-view]').forEach(btn => btn.classList.toggle('nav-hidden', !allowed.includes(btn.dataset.view)));
+  $('#currentUserName').textContent = currentProfile?.full_name || currentProfile?.username || 'Usuario';
+  $('#currentUserRole').textContent = role.replaceAll('_',' ');
+  $$('.session-user').forEach(input => input.value = currentOperatorName());
+  if ($('#shipmentOperator')) $('#shipmentOperator').value = currentOperatorName();
+}
+async function loadCurrentProfile(user) {
+  const { data, error } = await db.from('profiles').select('id,username,full_name,role,active').eq('id', user.id).single();
+  if (error) throw new Error(`Perfil: ${error.message}`);
+  if (!data?.active) throw new Error('La cuenta está inactiva. Contacta al Jefe de Almacén.');
+  currentProfile = data;
+  applyRolePermissions();
+}
+async function enterApplication(user) {
+  currentAuthUser = user;
+  await loadCurrentProfile(user);
+  $('#login').classList.add('hidden');
+  $('#app').classList.remove('hidden');
+  await init();
+}
+async function restoreSession() {
+  const { data: { session } } = await db.auth.getSession();
+  if (session?.user) {
+    try { await enterApplication(session.user); }
+    catch (err) { await db.auth.signOut(); console.error(err); }
+  }
+}
+async function renderUsers() {
+  if (!$('#usersBody') || normalizedRole() !== 'ADMINISTRADOR') return;
+  const { data, error } = await db.from('profiles').select('username,full_name,role,active,created_at').order('full_name');
+  if (error) { $('#usersBody').innerHTML = `<tr><td colspan="5" class="empty">${escapeHtml(error.message)}</td></tr>`; return; }
+  $('#usersBody').innerHTML = (data || []).map(u => `<tr><td>${escapeHtml(u.username||'—')}</td><td>${escapeHtml(u.full_name)}</td><td>${escapeHtml(u.role)}</td><td>${u.active?'Sí':'No'}</td><td>${u.created_at?new Date(u.created_at).toLocaleString():'—'}</td></tr>`).join('') || '<tr><td colspan="5" class="empty">Sin usuarios.</td></tr>';
+}
 
 const $ = s => document.querySelector(s);
 const $$ = s => [...document.querySelectorAll(s)];
@@ -117,17 +179,26 @@ function setConnectionState(text, state) {
   el.dataset.state = state;
 }
 
-$('#loginBtn').onclick = () => {
-  if ($('#user').value === 'supervisor' && $('#pass').value === 'demo') {
-    $('#login').classList.add('hidden');
-    $('#app').classList.remove('hidden');
-    init();
-  } else {
-    alert('Usa supervisor / demo');
-  }
+$('#loginBtn').onclick = async () => {
+  const username = normalizeUsername($('#user').value);
+  const password = $('#pass').value;
+  const help = $('#loginHelp');
+  if (!username || !password) { help.textContent = 'Captura usuario y contraseña.'; help.dataset.state = 'error'; return; }
+  $('#loginBtn').disabled = true;
+  help.textContent = 'Validando acceso…'; delete help.dataset.state;
+  try {
+    const { data, error } = await db.auth.signInWithPassword({ email: loginEmailForUsername(username), password });
+    if (error) throw error;
+    await enterApplication(data.user);
+  } catch (err) {
+    help.textContent = err.message === 'Invalid login credentials' ? 'Usuario o contraseña incorrectos.' : err.message;
+    help.dataset.state = 'error';
+  } finally { $('#loginBtn').disabled = false; }
 };
-
-$('#logout').onclick = () => location.reload();
+$('#pass').addEventListener('keydown', e => { if (e.key === 'Enter') $('#loginBtn').click(); });
+$('#logout').onclick = async () => { await db.auth.signOut(); location.reload(); };
+if ($('#refreshUsers')) $('#refreshUsers').onclick = renderUsers;
+restoreSession();
 
 $$('nav button').forEach(b => b.onclick = () => {
   $$('nav button').forEach(x => x.classList.remove('active'));
@@ -135,6 +206,7 @@ $$('nav button').forEach(b => b.onclick = () => {
   $$('.view').forEach(v => v.classList.add('hidden'));
   $('#' + b.dataset.view).classList.remove('hidden');
   $('#title').textContent = b.textContent;
+  if (b.dataset.view === 'usuarios') renderUsers();
 });
 
 function renderProducts(q='') {
@@ -474,7 +546,7 @@ $('#confirmReceipt').onclick = async () => {
     const { data, error } = await db.rpc('confirm_receipt', {
       p_receipt_date: $('#recDate').value || localDateISO(),
       p_observations: $('#notes').value.trim(),
-      p_operator_name: 'supervisor',
+      p_operator_name: currentOperatorName(),
       p_lines: payload
     });
     if (error) throw error;
@@ -512,7 +584,7 @@ function printReceipt(r) {
   const rows = r.detail.map(x => `<tr><td>${escapeHtml(x.sku)}</td><td>${escapeHtml(x.desc)}</td><td>${escapeHtml(x.lot)}</td><td>${x.production_date}</td><td>${x.expiration_date}</td><td style="text-align:right">${x.received_pieces.toLocaleString()}</td><td>${escapeHtml(x.allocations.map(a=>`${a.code}: ${a.pieces}`).join(', '))}</td></tr>`).join('');
   const w = window.open('', '_blank', 'width=1000,height=720');
   if (!w) return;
-  w.document.write(`<!doctype html><html><head><meta charset="utf-8"><title>${escapeHtml(r.folio)}</title><style>body{font-family:Arial,sans-serif;margin:28px;color:#111}h1{margin:0}p{margin:5px 0 18px}table{border-collapse:collapse;width:100%;font-size:12px}th,td{border:1px solid #bbb;padding:7px;vertical-align:top}th{background:#eee}.meta{display:flex;gap:35px;margin:20px 0}.sign{display:flex;justify-content:space-between;margin-top:70px}.sign div{width:42%;border-top:1px solid #333;text-align:center;padding-top:7px}@media print{button{display:none}}</style></head><body><h1>WMS Acatlán</h1><p><b>Recepción de Producción</b></p><div class="meta"><div><b>Folio:</b> ${escapeHtml(r.folio)}</div><div><b>Fecha:</b> ${escapeHtml(r.date)}</div><div><b>Usuario:</b> supervisor</div></div><table><thead><tr><th>SKU</th><th>Producto</th><th>Lote</th><th>Producción</th><th>Caducidad</th><th>Piezas</th><th>Ubicaciones</th></tr></thead><tbody>${rows}</tbody></table><p><b>Observaciones:</b> ${escapeHtml(r.notes || '—')}</p><p><b>Estatus:</b> PENDIENTE DE LIBERACIÓN POR CALIDAD</p><div class="sign"><div>Entregó Producción</div><div>Recibió Almacén</div></div><br><button onclick="window.print()">Imprimir / Guardar PDF</button></body></html>`);
+  w.document.write(`<!doctype html><html><head><meta charset="utf-8"><title>${escapeHtml(r.folio)}</title><style>body{font-family:Arial,sans-serif;margin:28px;color:#111}h1{margin:0}p{margin:5px 0 18px}table{border-collapse:collapse;width:100%;font-size:12px}th,td{border:1px solid #bbb;padding:7px;vertical-align:top}th{background:#eee}.meta{display:flex;gap:35px;margin:20px 0}.sign{display:flex;justify-content:space-between;margin-top:70px}.sign div{width:42%;border-top:1px solid #333;text-align:center;padding-top:7px}@media print{button{display:none}}</style></head><body><h1>WMS Acatlán</h1><p><b>Recepción de Producción</b></p><div class="meta"><div><b>Folio:</b> ${escapeHtml(r.folio)}</div><div><b>Fecha:</b> ${escapeHtml(r.date)}</div><div><b>Usuario:</b> ${escapeHtml(currentOperatorName())}</div></div><table><thead><tr><th>SKU</th><th>Producto</th><th>Lote</th><th>Producción</th><th>Caducidad</th><th>Piezas</th><th>Ubicaciones</th></tr></thead><tbody>${rows}</tbody></table><p><b>Observaciones:</b> ${escapeHtml(r.notes || '—')}</p><p><b>Estatus:</b> PENDIENTE DE LIBERACIÓN POR CALIDAD</p><div class="sign"><div>Entregó Producción</div><div>Recibió Almacén</div></div><br><button onclick="window.print()">Imprimir / Guardar PDF</button></body></html>`);
   w.document.close();
 }
 
@@ -723,7 +795,7 @@ async function confirmQualityAction() {
         p_block_pieces: block,
         p_reason: $('#qualityReason').value,
         p_observations: $('#qualityNotes').value.trim(),
-        p_operator_name: 'supervisor'
+        p_operator_name: currentOperatorName()
       });
       if (error) throw error;
       closeQualityModal(); await refreshOperationalData();
@@ -738,7 +810,7 @@ async function confirmQualityAction() {
         p_quantity_pieces: qty,
         p_reason: $('#qualityReason').value,
         p_observations: $('#qualityNotes').value.trim(),
-        p_operator_name: 'supervisor'
+        p_operator_name: currentOperatorName()
       });
       if (error) throw error;
       closeQualityModal(); await refreshOperationalData();
@@ -1331,7 +1403,7 @@ async function importOrdersExcel() {
         p_scheduled_date:o.scheduled_date ? `${o.scheduled_date}T12:00:00` : null,
         p_source_file:file.name,
         p_lines:o.lines,
-        p_operator_name:'supervisor'
+        p_operator_name:currentOperatorName()
       });
       if (error) failed.push(`${o.delivery_reference}: ${error.message}`);
       else ok++;
@@ -1383,7 +1455,7 @@ async function generatePicklist(orderId, btn) {
   if (!confirm('Se reservará inventario inmediatamente usando FEFO. ¿Generar picklist?')) return;
   const old=btn.textContent; btn.disabled=true; btn.textContent='Reservando…';
   try {
-    const {data,error}=await db.rpc('generate_wms_picklist',{p_order_id:orderId,p_operator_name:'supervisor'});
+    const {data,error}=await db.rpc('generate_wms_picklist',{p_order_id:orderId,p_operator_name:currentOperatorName()});
     if(error) throw error;
     await refreshOperationalData();
     alert(`Picklist generada.\nFolio: ${data.folio}\nSolicitado: ${Number(data.requested_pieces).toLocaleString()} piezas\nReservado: ${Number(data.reserved_pieces).toLocaleString()} piezas\nFaltante: ${Number(data.shortage_pieces).toLocaleString()} piezas\nVida mínima: ${data.minimum_shelf_life_days} días.`);
@@ -1455,7 +1527,7 @@ async function openPicklistDetail(id) {
   $('#picklistDetailTitle').textContent=`Picklist ${header?.folio || ''}`;
   $('#picklistDetailSub').textContent=header?`${header.delivery_reference} · ${header.customer_name} · ${header.status}`:'';
 
-  const editable=header?.status==='EN_SURTIDO' && header?.taken_by_name==='supervisor';
+  const editable=header?.status==='EN_SURTIDO' && header?.taken_by_name===currentOperatorName();
   const finished=['SURTIDA_COMPLETA','SURTIDA_PARCIAL'].includes(header?.status);
 
   $('#picklistDetailBody').innerHTML=currentPicklistDetail.map((x,i)=>`<tr data-line-id="${escapeHtml(x.picklist_line_id)}" data-reserved="${Number(x.reserved_pieces||0)}">
@@ -1492,7 +1564,7 @@ async function openPicklistDetail(id) {
 
 async function takeCurrentPicklist() {
   if(!currentPicklistId)return;
-  const {data,error}=await db.rpc('take_wms_picklist',{p_picklist_id:currentPicklistId,p_operator_name:'supervisor'});
+  const {data,error}=await db.rpc('take_wms_picklist',{p_picklist_id:currentPicklistId,p_operator_name:currentOperatorName()});
   if(error)return alert('No se pudo tomar la picklist.\n\n'+error.message);
   await refreshOrdersPicklists();
   await openPicklistDetail(currentPicklistId);
@@ -1530,7 +1602,7 @@ async function confirmCurrentPicking() {
   if(!confirm(`Se descontarán ${total.toLocaleString()} piezas del inventario. Esta acción no se puede editar. ¿Confirmar surtido?`))return;
   const btn=$('#confirmPicking');btn.disabled=true;const old=btn.textContent;btn.textContent='Confirmando…';
   try{
-    const {data,error}=await db.rpc('confirm_wms_picking',{p_picklist_id:currentPicklistId,p_operator_name:'supervisor',p_lines:lines});
+    const {data,error}=await db.rpc('confirm_wms_picking',{p_picklist_id:currentPicklistId,p_operator_name:currentOperatorName(),p_lines:lines});
     if(error)throw error;
     await refreshOperationalData();
     alert(`Surtido confirmado.\nFolio: ${data.folio}\nConfirmado: ${Number(data.confirmed_pieces).toLocaleString()} piezas\nDiferencia: ${Number(data.difference_pieces).toLocaleString()} piezas\nEstatus: ${data.status}`);
@@ -1656,7 +1728,7 @@ function openShipmentForm(picklistId) {
   currentShipmentPicklistId=picklistId;
   $('#shipmentFormTitle').textContent=`Confirmar embarque · ${row.picklist_folio}`;
   $('#shipmentFormSubtitle').textContent=`Pedido ${row.delivery_reference} · ${row.customer_name} · ${Number(row.confirmed_pieces||0).toLocaleString()} piezas · ${Number(row.pallet_positions||0)} posiciones`;
-  $('#shipmentOperator').value='supervisor';
+  $('#shipmentOperator').value=currentOperatorName();
   $('#shipmentDriver').value='';
   $('#shipmentPlates').value='';
   $('#shipmentNotes').value='';

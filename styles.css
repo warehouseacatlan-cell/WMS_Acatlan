@@ -58,3 +58,4 @@
 #shipmentFormPanel textarea{width:100%;box-sizing:border-box;margin-top:6px;padding:10px;border:1px solid #cfd8e3;border-radius:7px;font:inherit;resize:vertical}
 @media(max-width:900px){.shipment-summary{grid-template-columns:repeat(2,minmax(140px,1fr))}}
 @media(max-width:520px){.shipment-summary{grid-template-columns:1fr}}
+.role-secondary{opacity:.75;font-size:.78rem;margin-top:-8px}.login-card small[data-state="error"]{color:#b42318}.login-card button:disabled{opacity:.65;cursor:wait}.user-help{padding:12px 14px;margin:12px 0;background:#f5f7fa;border-radius:10px}.nav-hidden{display:none!important}
