@@ -81,11 +81,58 @@ async function restoreSession() {
 }
 let adminUserRows = [];
 
-async function invokeAdminUsers(action, payload={}) {
-  const { data, error } = await db.functions.invoke('admin-users', { body: { action, ...payload } });
-  if (error) throw new Error(error.message || 'No fue posible ejecutar la administración de usuarios.');
-  if (!data?.ok) throw new Error(data?.error || 'La operación de usuarios no pudo completarse.');
-  return data;
+const {
+  data: { session },
+  error: sessionError,
+} = await supabase.auth.getSession();
+
+if (sessionError) {
+  throw new Error(sessionError.message);
+}
+
+if (!session?.access_token) {
+  throw new Error(
+    'La sesión expiró. Cierra sesión y vuelve a ingresar.'
+  );
+}
+
+const { data, error } = await supabase.functions.invoke(
+  'admin-users',
+  {
+    headers: {
+      Authorization: `Bearer ${session.access_token}`,
+    },
+    body: {
+      action: 'create',
+      full_name: fullName,
+      username,
+      role,
+      password,
+    },
+  }
+);
+
+if (error) {
+  let message = error.message;
+
+  if (error.context) {
+    try {
+      const detail = await error.context.json();
+      message =
+        detail?.error ||
+        detail?.detail ||
+        detail?.message ||
+        message;
+    } catch {
+      // Conserva el mensaje original.
+    }
+  }
+
+  throw new Error(message);
+}
+
+if (!data?.ok) {
+  throw new Error(data?.error || 'No se pudo crear el usuario.');
 }
 
 function roleLabel(role='') {
