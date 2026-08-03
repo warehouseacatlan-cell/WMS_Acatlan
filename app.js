@@ -27,13 +27,14 @@ let currentProfile = null;
 
 
 const ROLE_PERMISSIONS = {
-  ADMINISTRADOR: ['dashboard','recepcion','productos','ubicaciones','pedidos','picklists','embarques','calidad','inventario','transferencias','usuarios'],
-  SUPERVISOR: ['dashboard','recepcion','productos','ubicaciones','pedidos','picklists','embarques','calidad','inventario','transferencias'],
+  ADMINISTRADOR: ['dashboard','recepcion','productos','ubicaciones','pedidos','picklists','embarques','calidad','inventario','transferencias','conteos','usuarios'],
+  SUPERVISOR: ['dashboard','recepcion','productos','ubicaciones','pedidos','picklists','embarques','calidad','inventario','transferencias','conteos'],
   SUPERVISOR_DE_ALMACEN: ['dashboard','recepcion','productos','ubicaciones','pedidos','picklists','embarques','calidad','inventario','transferencias'],
   ALMACENISTA: ['dashboard','recepcion','picklists','inventario','transferencias'],
   CALIDAD: ['dashboard','calidad','inventario'],
   EMBARQUES: ['dashboard','picklists','embarques','inventario'],
-  CONSULTA: ['dashboard','productos','ubicaciones','inventario']
+  CONTADOR: ['dashboard','conteos','inventario'],
+  CONSULTA: ['dashboard','productos','ubicaciones','inventario','conteos']
 };
 
 function normalizeUsername(value='') {
@@ -207,6 +208,7 @@ $$('nav button').forEach(b => b.onclick = () => {
   $('#' + b.dataset.view).classList.remove('hidden');
   $('#title').textContent = b.textContent;
   if (b.dataset.view === 'usuarios') renderUsers();
+  if (b.dataset.view === 'conteos') refreshCycleCounts();
 });
 
 function renderProducts(q='') {
@@ -1795,3 +1797,117 @@ $('#takePicklist')?.addEventListener('click',takeCurrentPicklist);
 $('#fillCompletePicking')?.addEventListener('click',fillCompletePicking);
 $('#confirmPicking')?.addEventListener('click',confirmCurrentPicking);
 
+
+
+// ==================== CONTEOS POR UBICACIÓN ====================
+let cycleCountRows = [];
+let currentCycleCount = null;
+
+function countStageLabel(stage='') {
+  return ({
+    PRIMER_CONTEO:'Primer conteo', SEGUNDO_CONTEO:'Segundo conteo',
+    CONTEO_PRODUCTO:'Conteo total del producto', CONTEO_PRODUCTO_GENERADO:'Conteo de producto generado',
+    CERRADO:'Cerrado sin diferencia', AJUSTE_GENERADO:'Ajuste pendiente',
+    REUBICACION_REQUERIDA:'Reubicación requerida', CANCELADO:'Cancelado'
+  })[stage] || stage.replaceAll('_',' ');
+}
+function isOpenCount(stage='') {
+  return ['PRIMER_CONTEO','SEGUNDO_CONTEO','CONTEO_PRODUCTO'].includes(stage);
+}
+function fillCountLocations() {
+  const select=$('#countLocation');
+  if(!select) return;
+  const previous=select.value;
+  select.innerHTML='<option value="">Selecciona una ubicación</option>'+locations.map(l=>`<option value="${escapeHtml(l.id)}">${escapeHtml(l.ubicacion)} · ${escapeHtml(l.location_type)}</option>`).join('');
+  select.value=previous;
+}
+async function refreshCycleCounts() {
+  if(!$('#cycleCountsBody')) return;
+  fillCountLocations();
+  try {
+    const {data,error}=await db.rpc('wms_get_cycle_counts');
+    if(error) throw error;
+    cycleCountRows=Array.isArray(data)?data:[];
+    renderCycleCounts();
+    setDashText('dashCounts',cycleCountRows.filter(x=>isOpenCount(x.workflow_stage)).length);
+  } catch(err) {
+    console.error(err);
+    $('#cycleCountsBody').innerHTML=`<tr><td colspan="7" class="empty">${escapeHtml(err.message)}. Ejecuta primero 03_habilitar_conteos_por_ubicacion.sql.</td></tr>`;
+  }
+}
+function renderCycleCounts() {
+  const q=normalizeText($('#countFilter')?.value||'');
+  const rows=cycleCountRows.filter(x=>normalizeText(`${x.folio} ${x.locations||''} ${x.trigger_sku||''} ${x.trigger_product||''} ${x.workflow_stage}`).includes(q));
+  const open=cycleCountRows.filter(x=>isOpenCount(x.workflow_stage)).length;
+  $('#cycleCountBadge').textContent=`${open} abiertos`;
+  $('#cycleCountsBody').innerHTML=rows.map(x=>`<tr>
+    <td><b>${escapeHtml(x.folio)}</b></td><td>${x.count_type==='PRODUCTO'?'Producto':'Ubicación'}</td>
+    <td>${escapeHtml(x.count_type==='PRODUCTO'?`${x.trigger_sku||''} — ${x.trigger_product||''}`:(x.locations||'—'))}</td>
+    <td><span class="count-stage ${escapeHtml(x.workflow_stage)}">${escapeHtml(countStageLabel(x.workflow_stage))}</span></td>
+    <td>${Number(x.line_count||0)}</td><td>${x.created_at?new Date(x.created_at).toLocaleString():'—'}</td>
+    <td><button class="mini open-count" data-id="${escapeHtml(x.id)}">${isOpenCount(x.workflow_stage)?'Capturar':'Ver'}</button></td>
+  </tr>`).join('')||'<tr><td colspan="7" class="empty">Sin conteos.</td></tr>';
+}
+async function createLocationCount() {
+  const locationId=$('#countLocation').value;
+  if(!locationId) return alert('Selecciona una ubicación.');
+  if(!confirm('Se tomará una fotografía del inventario teórico de esta ubicación. ¿Lanzar conteo ciego?')) return;
+  const btn=$('#createLocationCount'); btn.disabled=true;
+  try {
+    const {data,error}=await db.rpc('wms_create_location_count',{p_location_id:locationId,p_observations:$('#countObservations').value.trim()||null});
+    if(error) throw error;
+    $('#countObservations').value='';
+    await refreshCycleCounts();
+    alert(`Conteo creado: ${data.folio}\nUbicación: ${data.location}\nLíneas: ${data.lines}`);
+    await openCycleCount(data.id);
+  } catch(err){ alert('No se pudo lanzar el conteo.\n\n'+err.message); }
+  finally{ btn.disabled=false; }
+}
+async function openCycleCount(id) {
+  try {
+    const {data,error}=await db.rpc('wms_get_cycle_count_detail',{p_cycle_count_id:id});
+    if(error) throw error;
+    currentCycleCount=data;
+    $('#countDetailTitle').textContent=`${data.folio} · ${countStageLabel(data.workflow_stage)}`;
+    $('#countDetailHelp').textContent=data.count_type==='PRODUCTO'?`Cuenta el producto ${data.trigger_sku} en todas sus ubicaciones.`:'Cuenta físicamente todo lo ubicado en la posición.';
+    const editable=isOpenCount(data.workflow_stage);
+    $('#countDetailBody').innerHTML=(data.lines||[]).map(l=>`<tr>
+      <td><b>${escapeHtml(l.location)}</b></td><td>${escapeHtml(l.sku)}</td><td>${escapeHtml(l.product)}</td><td>${escapeHtml(l.lot)}</td>
+      <td>${editable?`<input class="count-input" type="number" min="0" step="1" data-line-id="${escapeHtml(l.id)}" placeholder="0">`:`<b>${Number(l.final_count_pieces??l.first_count_pieces??0).toLocaleString()}</b><small class="pick-user">Diferencia: ${Number(l.difference_pieces||0).toLocaleString()}</small>`}</td>
+    </tr>`).join('');
+    $('#submitCount').classList.toggle('hidden',!editable);
+    $('#countDetailPanel').classList.remove('hidden');
+    $('#countDetailPanel').scrollIntoView({behavior:'smooth',block:'start'});
+  } catch(err){ alert('No se pudo abrir el conteo.\n\n'+err.message); }
+}
+async function submitCycleCount() {
+  if(!currentCycleCount) return;
+  const inputs=[...document.querySelectorAll('#countDetailBody .count-input')];
+  if(!inputs.length) return;
+  const counts=[];
+  for(const input of inputs){
+    if(input.value===''||Number(input.value)<0||!Number.isInteger(Number(input.value))) return alert('Captura todas las cantidades en piezas enteras, incluyendo cero.');
+    counts.push({line_id:input.dataset.lineId,pieces:Number(input.value)});
+  }
+  const label=countStageLabel(currentCycleCount.workflow_stage);
+  if(!confirm(`Confirmar ${label.toLowerCase()}? Después de guardar no se podrá editar.`)) return;
+  const btn=$('#submitCount'); btn.disabled=true; btn.textContent='Procesando…';
+  try {
+    const {data,error}=await db.rpc('wms_submit_cycle_count',{p_cycle_count_id:currentCycleCount.id,p_counts:counts});
+    if(error) throw error;
+    alert(data.message+(data.adjustment_folio?`\nAjuste: ${data.adjustment_folio}`:''));
+    $('#countDetailPanel').classList.add('hidden'); currentCycleCount=null;
+    await refreshCycleCounts();
+    await refreshDashboardSnapshot();
+  } catch(err){ alert('No se pudo confirmar el conteo.\n\n'+err.message); }
+  finally{ btn.disabled=false; btn.textContent='Confirmar conteo'; }
+}
+
+document.addEventListener('click',event=>{
+  const b=event.target.closest('.open-count'); if(b) openCycleCount(b.dataset.id);
+});
+$('#createLocationCount')?.addEventListener('click',createLocationCount);
+$('#refreshCounts')?.addEventListener('click',refreshCycleCounts);
+$('#countFilter')?.addEventListener('input',renderCycleCounts);
+$('#closeCountDetail')?.addEventListener('click',()=>{$('#countDetailPanel').classList.add('hidden');currentCycleCount=null;});
+$('#submitCount')?.addEventListener('click',submitCycleCount);
