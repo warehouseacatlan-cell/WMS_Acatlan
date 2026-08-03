@@ -81,60 +81,74 @@ async function restoreSession() {
 }
 let adminUserRows = [];
 
-const {
-  data: { session },
-  error: sessionError,
-} = await supabase.auth.getSession();
+async function invokeAdminUsers(action, payload = {}) {
+  const {
+    data: { session },
+    error: sessionError,
+  } = await db.auth.getSession();
 
-if (sessionError) {
-  throw new Error(sessionError.message);
-}
+  if (sessionError) {
+    throw new Error(`No se pudo obtener la sesión: ${sessionError.message}`);
+  }
 
-if (!session?.access_token) {
-  throw new Error(
-    'La sesión expiró. Cierra sesión y vuelve a ingresar.'
-  );
-}
+  let activeSession = session;
 
-const { data, error } = await supabase.functions.invoke(
-  'admin-users',
-  {
+  if (!activeSession?.access_token) {
+    const {
+      data: { session: refreshedSession },
+      error: refreshError,
+    } = await db.auth.refreshSession();
+
+    if (refreshError) {
+      throw new Error(`No se pudo renovar la sesión: ${refreshError.message}`);
+    }
+
+    activeSession = refreshedSession;
+  }
+
+  if (!activeSession?.access_token) {
+    throw new Error('La sesión expiró. Cierra sesión y vuelve a ingresar.');
+  }
+
+  const { data, error } = await db.functions.invoke('admin-users', {
     headers: {
-      Authorization: `Bearer ${session.access_token}`,
+      Authorization: `Bearer ${activeSession.access_token}`,
     },
     body: {
-      action: 'create',
-      full_name: fullName,
-      username,
-      role,
-      password,
+      action,
+      ...payload,
     },
-  }
-);
+  });
 
-if (error) {
-  let message = error.message;
+  if (error) {
+    let message = error.message || 'No se pudo ejecutar la operación de usuarios.';
 
-  if (error.context) {
-    try {
-      const detail = await error.context.json();
-      message =
-        detail?.error ||
-        detail?.detail ||
-        detail?.message ||
-        message;
-    } catch {
-      // Conserva el mensaje original.
+    if (error.context) {
+      try {
+        const detail = await error.context.json();
+        message =
+          detail?.error ||
+          detail?.detail ||
+          detail?.message ||
+          message;
+      } catch {
+        // Conserva el mensaje original cuando la respuesta no contiene JSON.
+      }
     }
+
+    throw new Error(message);
   }
 
-  throw new Error(message);
-}
+  if (!data?.ok) {
+    throw new Error(
+      data?.error ||
+      data?.detail ||
+      'No se pudo completar la operación de usuarios.'
+    );
+  }
 
-if (!data?.ok) {
-  throw new Error(data?.error || 'No se pudo crear el usuario.');
+  return data;
 }
-
 function roleLabel(role='') {
   return String(role).replaceAll('_',' ').toLowerCase().replace(/(^|\s)\S/g, c => c.toUpperCase());
 }
